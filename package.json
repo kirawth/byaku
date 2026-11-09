@@ -1,6 +1,6 @@
 {
   "name": "byaku",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "An owner-only developer console for Seyfert Discord bots: eval with an object explorer, a live shell and more.",
   "keywords": [
     "seyfert",

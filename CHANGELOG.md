@@ -1,5 +1,19 @@
 # byaku
 
+## 2.0.0
+
+### Major Changes
+
+- 61d9f75: Leave the bot's prefix function and command handler untouched. Add shouldSkipMessageCommand(raw) for explicit native routing before argument parsing. Bots with colliding commands or a loaded ByakuCommand must add this hook to retain automatic trigger isolation; advanced.prefixGuard continues to control that decision.
+
+### Patch Changes
+
+- f61e6c5: Use Seyfert's public plugin contributions and collector stop callbacks to manage Byaku's handlers. Uninstalling one instance no longer removes another instance's controls; manual handlers are deactivated and reused on reinstall.
+- 374b370: Acknowledge code modal submissions before downloading uploads or evaluating code, preserving the selected reply visibility and updating the deferred reply for results and live output.
+- a14568d: Correct file-loader setup examples to export ByakuButtons, ByakuSelects and ByakuModal from separate files, with an optional ByakuCommand file. Keep the ByakuComponents and ByakuModals constructor arrays for direct registration.
+- 84954c4: Keep the plugin's `/byaku` slash command registered when the bot loads its own commands from files during startup.
+- 7cec7ea: Redact secrets in explorer menus, breadcrumbs, confirmation prompts, status text, autocomplete, and modal displays as well as message output. Keep raw inputs and navigation keys for execution; editing secret-bearing input requires new code, while Re-run retains the original.
+
 ## 1.0.0
 
 ### Major Changes
