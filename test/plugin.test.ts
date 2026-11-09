@@ -1,5 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 
 import { Command, type CommandContext, InteractionContextType } from 'seyfert';
@@ -15,7 +14,10 @@ afterEach(async () => {
 });
 
 async function commandsDirectory() {
-  const dir = await mkdtemp(join(tmpdir(), 'byaku-commands-'));
+  // Seyfert resolves command locations from the working directory, so keep them on the same drive
+  const parent = join(process.cwd(), 'node_modules', '.cache');
+  await mkdir(parent, { recursive: true });
+  const dir = await mkdtemp(join(parent, 'byaku-commands-'));
   cleanup.push(() => rm(dir, { recursive: true, force: true }));
   await writeFile(join(dir, 'package.json'), JSON.stringify({ type: 'module' }));
   await writeFile(
