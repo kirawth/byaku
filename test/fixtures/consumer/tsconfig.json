@@ -1,0 +1,17 @@
+{
+  // In the repo, `byaku` points at the source; scripts/check-package.mjs type-checks the same file against the packed package
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "types": ["node"],
+    "skipLibCheck": true,
+    "paths": {
+      "byaku": ["../../../src/index.ts"],
+      "byaku/plugin": ["../../../src/plugin.ts"]
+    }
+  },
+  "include": ["index.ts"]
+}

@@ -76,11 +76,14 @@
     "dev": "tsup --watch",
     "lint": "eslint . && prettier --check . && knip",
     "format": "prettier --write .",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test/fixtures/consumer",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
+    "test:package": "node scripts/check-package.mjs",
+    "check": "npm run lint && npm run typecheck && npm run build && npm run test:coverage && npm run test:package",
     "changeset": "changeset",
-    "release": "changeset publish"
+    "release": "changeset publish",
+    "prepublishOnly": "npm run check"
   },
   "peerDependencies": {
     "seyfert": "^5.2.0",
