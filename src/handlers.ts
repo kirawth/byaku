@@ -12,6 +12,7 @@ import {
   ModalCommand,
   type ModalContext,
 } from 'seyfert';
+import type { InteractionCreateBodyRequest } from 'seyfert/lib/common/index.js';
 
 import type { Byaku } from './byaku.js';
 import { MAX_DEPTH } from './inspect.js';
@@ -31,7 +32,7 @@ export function isByakuHandler(value: unknown): boolean {
 
 function deny(byaku: Byaku, ctx: ButtonOrSelect | ModalContext, content: string): Promise<unknown> {
   return ctx
-    .write({ content: byaku.redact(content), flags: 64, allowed_mentions: { parse: [] } } as never)
+    .write({ content: byaku.redact(content), flags: 64, allowed_mentions: { parse: [] } })
     .catch(() => undefined);
 }
 
@@ -72,7 +73,7 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
       return audit('delete');
     }
     if (id.action === 'x') {
-      await ctx.update({ components: [] } as never);
+      await ctx.update({ components: [] });
       return audit('remove-controls');
     }
     return deny(byaku, ctx, 'This session has ended. Run the command again.');
@@ -83,15 +84,15 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
   await byaku.sessions.touch(session);
   const update = async () => {
     await byaku.sessions.save(session);
-    await ctx.update(byaku.render(session) as never);
+    await ctx.update(byaku.render(session));
   };
-  const reply = (body: { content?: string; files?: AttachmentBuilder[] }) =>
+  const reply = (body: InteractionCreateBodyRequest) =>
     ctx.write({
       flags: 64,
       allowed_mentions: { parse: [] },
       ...body,
-      ...(body.content !== undefined ? { content: byaku.redact(body.content) } : {}),
-    } as never);
+      ...(typeof body.content === 'string' ? { content: byaku.redact(body.content) } : {}),
+    });
   const value = (ctx.interaction as { values?: string[] }).values?.[0] ?? '';
 
   switch (id.action) {
@@ -145,7 +146,7 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
     case 'x':
       audit('remove-controls');
       await byaku.endSession(session, 'controls removed');
-      return ctx.update({ components: [] } as never);
+      return ctx.update({ components: [] });
     case 'd':
       audit('delete');
       await ctx.deferUpdate();
@@ -185,7 +186,7 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
     case 'no':
       audit('cancel', { outcome: 'cancelled' });
       await byaku.endSession(session, 'cancelled');
-      return ctx.update(plainBody(byaku.redact(`-# ✖️ Cancelled: ${session.mode}`), [], session.ephemeral) as never);
+      return ctx.update(plainBody(byaku.redact(`-# ✖️ Cancelled: ${session.mode}`), [], session.ephemeral));
     case 'dp':
       if (value === 'h') {
         const on = !(session.view.hidden || session.view.getters);
@@ -266,7 +267,7 @@ async function handleModal(byaku: Byaku, ctx: ModalContext): Promise<unknown> {
     audit('page');
     // A modal opened from a button edits that button's message with deferUpdate + editResponse
     await ctx.deferUpdate();
-    return ctx.editResponse(byaku.render(session) as never);
+    return ctx.editResponse(byaku.render(session));
   }
   if (kind === 'e') {
     const code = inputValue(ctx, INPUT.code).trim();
@@ -315,15 +316,15 @@ async function runCodeModal(byaku: Byaku, ctx: ModalContext, kind: string): Prom
 }
 
 /** As a slash command it opens the code modal; as a prefix command it runs the text like a trigger. */
-async function handleCommand(byaku: Byaku, ctx: CommandContext): Promise<unknown> {
-  // `ctx.message` is typed `never` unless the bot declares prefix commands in its Seyfert registry
-  const message = (ctx as unknown as { message?: MessageStructure }).message;
+async function handleCommand(byaku: Byaku, ctx: CommandContext<ReturnType<typeof commandOptions>>): Promise<unknown> {
+  // The consumer controls InternalOptions.withPrefix; this library also handles prefix contexts at runtime.
+  const message = (ctx as { message?: MessageStructure }).message;
   const userId = ctx.author.id;
   if (!byaku.enabled || !(await byaku.isOwner(userId))) {
     byaku.audit({ action: 'denied', userId, outcome: 'denied', channelId: ctx.channelId });
     return message
       ? undefined
-      : ctx.write({ content: byaku.redact('Byaku is owner-only.'), flags: 64 } as never).catch(() => undefined);
+      : ctx.write({ content: byaku.redact('Byaku is owner-only.'), flags: 64 }).catch(() => undefined);
   }
 
   if (message) {
@@ -341,13 +342,11 @@ async function handleCommand(byaku: Byaku, ctx: CommandContext): Promise<unknown
     });
   }
 
-  const options = ctx.options as { mode?: string; ephemeral?: boolean };
+  const options = ctx.options;
   const mode = byaku.registry.resolve(options.mode ?? 'js') ?? 'js';
   if (byaku.redact(mode) !== mode)
-    return ctx.write(
-      plainBody('This mode contains a secret. Run it through a message trigger instead.', [], true) as never,
-    );
-  return ctx.modal(codeModal(mode, options.ephemeral ?? true, (text) => byaku.redact(text)) as never);
+    return ctx.write(plainBody('This mode contains a secret. Run it through a message trigger instead.', [], true));
+  return ctx.modal(codeModal(mode, options.ephemeral ?? true, (text) => byaku.redact(text)));
 }
 
 async function suggestModes(byaku: Byaku, interaction: AutocompleteInteraction): Promise<void> {
@@ -414,6 +413,17 @@ export function createHandlerClasses(byaku: Byaku): ByakuHandlerClasses {
   };
 }
 
+function commandOptions(byaku: Byaku) {
+  return {
+    mode: createStringOption({
+      description: 'Mode (default: js)',
+      required: false,
+      autocomplete: (interaction: AutocompleteInteraction) => suggestModes(byaku, interaction),
+    }),
+    ephemeral: createBooleanOption({ description: 'Only you see the reply (default: yes)', required: false }),
+  };
+}
+
 export function createSlashCommand(byaku: Byaku): new () => Command {
   return class ByakuCommand extends Command {
     readonly [BYAKU_HANDLER] = true;
@@ -424,23 +434,10 @@ export function createSlashCommand(byaku: Byaku): new () => Command {
       this.description = 'Owner-only developer console';
       // Without @Declare the contexts are empty, and Seyfert would never run the command
       this.contexts = [InteractionContextType.Guild, InteractionContextType.BotDM];
-      this.options = [
-        {
-          ...createStringOption({
-            description: 'Mode (default: js)',
-            required: false,
-            autocomplete: (interaction: AutocompleteInteraction) => suggestModes(byaku, interaction),
-          }),
-          name: 'mode',
-        },
-        {
-          ...createBooleanOption({ description: 'Only you see the reply (default: yes)', required: false }),
-          name: 'ephemeral',
-        },
-      ] as never;
+      this.options = Object.entries(commandOptions(byaku)).map(([name, option]) => ({ ...option, name }));
     }
 
-    override run(ctx: CommandContext) {
+    override run(ctx: CommandContext<ReturnType<typeof commandOptions>>) {
       return handleCommand(byaku, ctx);
     }
   };

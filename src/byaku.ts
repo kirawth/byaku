@@ -5,6 +5,9 @@ import { performance } from 'node:perf_hooks';
 import {
   type Client,
   type CommandContext,
+  type GatewayDispatchPayload,
+  type MessageData,
+  type MessageFlags,
   type MessageStructure,
   type ModalContext,
   Transformers,
@@ -234,20 +237,29 @@ export class Byaku {
     const client = this.client as GatewayClient;
 
     // Seyfert doesn't await `raw` collectors, so a long run never holds up the bot's own handling
-    const run = (packet: { t: string; d: RawMessage }) => {
-      const handle = {
-        MESSAGE_CREATE: this.handleRaw,
-        MESSAGE_UPDATE: this.handleRawUpdate,
-        MESSAGE_DELETE: this.handleRawDelete,
-      }[packet.t as 'MESSAGE_CREATE'];
-      void handle.call(this, packet.d).catch((err: unknown) => client.logger.error('[byaku]', err));
+    const run = (packet: GatewayDispatchPayload) => {
+      let task: Promise<boolean>;
+      switch (packet.t) {
+        case 'MESSAGE_CREATE':
+          task = this.handleRaw(packet.d);
+          break;
+        case 'MESSAGE_UPDATE':
+          task = this.handleRawUpdate(packet.d);
+          break;
+        case 'MESSAGE_DELETE':
+          task = this.handleRawDelete(packet.d);
+          break;
+        default:
+          return;
+      }
+      void task.catch((err: unknown) => client.logger.error('[byaku]', err));
     };
     client.collectors.create({
       event: 'raw',
       filter: (packet: { t?: string }) =>
         packet.t === 'MESSAGE_CREATE' || packet.t === 'MESSAGE_UPDATE' || packet.t === 'MESSAGE_DELETE',
       run,
-    } as never);
+    });
     // Collectors have no public remove; Seyfert keeps a copy of the options, so find ours by its `run`
     this.stopCollector = () => {
       const list = client.collectors.values.get('raw') as { options: { run: unknown } }[] | undefined;
@@ -263,7 +275,7 @@ export class Byaku {
     if (!this.plugin && this.options.slash && !client.commands.values.some(isByakuHandler)) {
       const command = new (createSlashCommand(this))();
       if (this.options.slash.guilds) command.guildId = [...this.options.slash.guilds];
-      client.commands.set([command as never]);
+      client.commands.set([command]);
     }
 
     const commands = client.options.commands;
@@ -365,9 +377,10 @@ export class Byaku {
     const commandAnswers = !this.options.prefixGuard && this.client.commands.values.some(isByakuHandler);
     if (!prefix || commandAnswers) return undefined;
     try {
+      // Keep the public partial raw-message contract; the gateway provides Seyfert's full payload.
       return this.match(
         content,
-        await unguardPrefix(prefix)(message ?? Transformers.Message(this.client, raw as never)),
+        await unguardPrefix(prefix)(message ?? Transformers.Message(this.client, raw as MessageData)),
       );
     } catch {
       return undefined;
@@ -392,7 +405,8 @@ export class Byaku {
       ...where,
       triggerId: raw.id,
       text,
-      message: message ?? Transformers.Message(this.client, raw as never),
+      // Keep the public partial raw-message contract; the gateway provides Seyfert's full payload.
+      message: message ?? Transformers.Message(this.client, raw as MessageData),
       delivery: { kind: 'reply', triggerId: raw.id },
     });
     return true;
@@ -722,14 +736,14 @@ export class Byaku {
         const reference = delivery.triggerId
           ? { message_reference: { message_id: delivery.triggerId, fail_if_not_exists: false } }
           : {};
-        session.replyId = (await this.client.messages.write(session.channelId, { ...body, ...reference } as never)).id;
+        session.replyId = (await this.client.messages.write(session.channelId, { ...body, ...reference })).id;
       } else if (delivery.kind === 'context') {
         // On a prefix context, editOrReply(body, true) returns the reply; later edits go to that same message
-        const sent = await delivery.ctx.editOrReply(body as never, true);
-        session.replyId = (sent as { id?: string } | undefined)?.id;
+        const sent = await delivery.ctx.editOrReply(body, true);
+        session.replyId = sent?.id;
       } else if (delivery.kind === 'modal') {
         const { flags: _flags, ...edit } = body;
-        const sent = await delivery.ctx.editResponse(edit as never);
+        const sent = await delivery.ctx.editResponse(edit);
         Object.assign(session, { interactionToken: delivery.ctx.interaction.token });
         session.data.tokenAt = Date.now();
         if (!session.ephemeral) session.replyId = sent.id;
@@ -759,9 +773,10 @@ export class Byaku {
       (session.ephemeral || !session.replyId) &&
       Date.now() - Number(session.data.tokenAt ?? 0) < TOKEN_TTL_MS
     ) {
-      await this.client.interactions.editOriginal(token, edit as never);
+      await this.client.interactions.editOriginal(token, edit);
     } else if (session.replyId) {
-      await this.client.messages.edit(session.replyId, session.channelId, { ...edit, flags: 0 } as never);
+      // MessageFlags has no zero member, but Discord accepts zero to clear reply flags.
+      await this.client.messages.edit(session.replyId, session.channelId, { ...edit, flags: 0 as MessageFlags });
     }
   }
 

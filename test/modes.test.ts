@@ -1,8 +1,9 @@
+import { HttpClient } from 'seyfert';
 import { describe, expect, it } from 'vitest';
 
 import { Byaku } from '../src/byaku.js';
 import { defineMode } from '../src/modes/index.js';
-import { FakeBot, type FakeMessage } from './helpers.js';
+import { CHANNEL_ID, FakeBot, type FakeMessage, OWNER_ID } from './helpers.js';
 
 async function setup(options: ConstructorParameters<typeof Byaku>[1] = {}) {
   const bot = await FakeBot.create();
@@ -24,6 +25,28 @@ describe('summary and help', () => {
     expect(reply.content).toMatch(/\*\*Byaku\*\* `v\d/);
     expect(reply.content).toMatch(/<t:\d+:R>/);
     expect(reply.content).not.toContain('```');
+  });
+
+  it('summary and shards work with a real HTTP client without gateway or worker members', async () => {
+    const bot = await FakeBot.create();
+    const client = new HttpClient();
+    client.setServices({ rest: bot.client.rest });
+    const byaku = new Byaku(client, { advanced: { includeAppOwners: false } });
+
+    for (const text of ['', 'shards']) {
+      await byaku.run({
+        ownerId: OWNER_ID,
+        channelId: CHANNEL_ID,
+        text,
+        delivery: { kind: 'reply' },
+      });
+    }
+
+    const replies = [...bot.messages.values()];
+    expect(replies).toHaveLength(2);
+    expect(replies[0]?.content).toContain('Running shards - of - · gateway ping -');
+    expect(replies[0]?.content).toContain('Cache: 0 guilds · 0 users · 0 channels');
+    expect(replies[1]?.content).toContain('No shards (HTTP-only client?)');
   });
 
   it('help lists modes; help <mode> shows details', async () => {
