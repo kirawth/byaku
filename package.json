@@ -1,0 +1,109 @@
+{
+  "name": "byaku",
+  "version": "1.0.0",
+  "description": "An owner-only developer console for Seyfert Discord bots: eval with an object explorer, a live shell and more.",
+  "keywords": [
+    "seyfert",
+    "discord",
+    "bot",
+    "jishaku",
+    "dokdo",
+    "eval",
+    "console",
+    "developer-tools",
+    "debug"
+  ],
+  "homepage": "https://github.com/kirawth/byaku#readme",
+  "bugs": {
+    "url": "https://github.com/kirawth/byaku/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kirawth/byaku.git"
+  },
+  "license": "MIT",
+  "author": "Hasibur Rahman <https://h4sib.pro>",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./plugin": {
+      "import": {
+        "types": "./dist/plugin.d.ts",
+        "default": "./dist/plugin.js"
+      },
+      "require": {
+        "types": "./dist/plugin.d.cts",
+        "default": "./dist/plugin.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "plugin": [
+        "./dist/plugin.d.ts"
+      ]
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "lint": "eslint . && prettier --check . && knip",
+    "format": "prettier --write .",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "changeset": "changeset",
+    "release": "changeset publish"
+  },
+  "peerDependencies": {
+    "seyfert": "^5.2.0",
+    "sucrase": "^3.35.0"
+  },
+  "peerDependenciesMeta": {
+    "sucrase": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@changesets/cli": "2.31.1",
+    "@eslint/js": "10.0.1",
+    "@types/node": "20.19.43",
+    "@typescript-eslint/utils": "8.72.1",
+    "eslint": "10.14.0",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-import-resolver-typescript": "4.4.5",
+    "eslint-plugin-import-x": "4.18.1",
+    "knip": "6.44.2",
+    "prettier": "3.9.10",
+    "seyfert": "5.2.0",
+    "sucrase": "3.35.1",
+    "tsup": "8.5.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.72.1"
+  }
+}

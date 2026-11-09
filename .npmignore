@@ -1,0 +1,20 @@
+# `files` in package.json decides what is published; this is a second guard.
+src/
+test/
+examples/
+scripts/
+coverage/
+.github/
+.changeset/
+tsconfig*.json
+tsup.config.ts
+vitest.config.ts
+eslint.config.js
+.prettierrc*
+.prettierignore
+knip.json
+.editorconfig
+.nvmrc
+.npmrc
+*.tgz
+.env*

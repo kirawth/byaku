@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    // tsup's declaration build sets `baseUrl`, which TypeScript 6 deprecates
+    "ignoreDeprecations": "6.0",
+    // Members marked @internal stay out of the published types
+    "stripInternal": true
+  },
+  "include": ["src"]
+}
