@@ -158,24 +158,22 @@ function keyList(keys: string[]): string {
   return keys.length > 40 ? `${shown}, … (+${keys.length - 40})` : shown;
 }
 
-/** One line: `Map(3)`, `'hello'`, `[Function: run]`. Never runs getters. */
-export function preview(value: unknown, max = 90): string {
-  return truncate(
-    safely(
-      () =>
-        inspect(value, { depth: 0, breakLength: Infinity, maxArrayLength: 5, maxStringLength: 80 }).replace(
-          /\s+/g,
-          ' ',
-        ),
-      (err) => `[${errorMessage(err)}]`,
-    ),
-    max,
+function previewText(value: unknown): string {
+  // Keep strings whole until redaction; cutting them first can expose part of a secret.
+  return safely(
+    () => inspect(value, { depth: 0, breakLength: Infinity, maxArrayLength: 5, maxStringLength: Infinity }),
+    (err) => `[${errorMessage(err)}]`,
   );
 }
 
-function describe(value: unknown): string {
+/** One line: `Map(3)`, `'hello'`, `[Function: run]`. Never runs getters. */
+export function preview(value: unknown, max = 90, display = (text: string) => text): string {
+  return truncate(display(previewText(value)).replace(/\s+/g, ' '), max);
+}
+
+function describe(value: unknown, display: (text: string) => string): string {
   const size = sizeOf(value);
-  return truncate(`${typeName(value)}${size ? ` (${size})` : ''} · ${preview(value, 70)}`, 100);
+  return truncate(display(`${typeName(value)}${size ? ` (${size})` : ''} · ${preview(value, 70, display)}`), 100);
 }
 
 function findDescriptor(target: object, key: string): PropertyDescriptor | undefined {
@@ -206,8 +204,13 @@ function inheritedGetters(target: object): string[] {
   return names;
 }
 
-function entryForKey(target: object, key: string, options: ViewOptions): ExplorerEntry {
-  const label = truncate(key, 100);
+function entryForKey(
+  target: object,
+  key: string,
+  options: ViewOptions,
+  display: (text: string) => string,
+): ExplorerEntry {
+  const label = truncate(display(key), 100);
   if (findDescriptor(target, key)?.get && !options.getters) {
     return { step: { kind: 'prop', key }, label, description: 'getter · turn on "getters" to open', getter: true };
   }
@@ -215,11 +218,15 @@ function entryForKey(target: object, key: string, options: ViewOptions): Explore
     () => Reflect.get(target, key),
     (err) => `[threw: ${errorMessage(err)}]`,
   );
-  return { step: { kind: 'prop', key }, label, description: describe(child) };
+  return { step: { kind: 'prop', key }, label, description: describe(child, display) };
 }
 
 /** The children of a value for the explorer's select menu. */
-export function listEntries(value: unknown, options: ViewOptions = {}): ExplorerEntry[] {
+export function listEntries(
+  value: unknown,
+  options: ViewOptions = {},
+  display = (text: string) => text,
+): ExplorerEntry[] {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return [];
   const entries: ExplorerEntry[] = [];
 
@@ -227,8 +234,16 @@ export function listEntries(value: unknown, options: ViewOptions = {}): Explorer
     if (value instanceof Map) {
       for (const [key, child] of value) {
         if (entries.length >= MAX_ENTRIES) break;
-        const label = truncate(typeof key === 'string' ? key : preview(key, 60), 100);
-        entries.push({ step: { kind: 'map', index: entries.length, label }, label, description: describe(child) });
+        const rawLabel = typeof key === 'string' ? key : previewText(key);
+        const label = truncate(
+          typeof key === 'string' ? display(rawLabel) : display(rawLabel).replace(/\s+/g, ' '),
+          typeof key === 'string' ? 100 : 60,
+        );
+        entries.push({
+          step: { kind: 'map', index: entries.length, label: rawLabel },
+          label,
+          description: describe(child, display),
+        });
       }
       return entries;
     }
@@ -238,7 +253,7 @@ export function listEntries(value: unknown, options: ViewOptions = {}): Explorer
         entries.push({
           step: { kind: 'set', index: entries.length },
           label: `[${entries.length}]`,
-          description: describe(child),
+          description: describe(child, display),
         });
       }
       return entries;
@@ -250,17 +265,22 @@ export function listEntries(value: unknown, options: ViewOptions = {}): Explorer
       if (entries.length >= MAX_ENTRIES) break;
       if (seen.has(key) || (Array.isArray(value) && key === 'length' && !options.hidden)) continue;
       seen.add(key);
-      entries.push(entryForKey(value, key, options));
+      entries.push(entryForKey(value, key, options, display));
     }
 
     if (options.hidden) {
       Object.getOwnPropertySymbols(value).forEach((sym, index) => {
-        const label = truncate(sym.toString(), 100);
+        const rawLabel = sym.toString();
+        const label = truncate(display(rawLabel), 100);
         const child = safely(
           () => Reflect.get(value, sym),
           (err) => `[${errorMessage(err)}]`,
         );
-        entries.push({ step: { kind: 'symbol', index, label }, label, description: describe(child) });
+        entries.push({
+          step: { kind: 'symbol', index, label: rawLabel },
+          label,
+          description: describe(child, display),
+        });
       });
     }
   } catch (err) {
@@ -330,8 +350,13 @@ function stepLabel(step: PathStep): string {
 }
 
 /** `client › cache › guilds`; long paths keep the root and the last steps. */
-export function breadcrumb(rootLabel: string, path: readonly PathStep[], max = 80): string {
-  const parts = [rootLabel, ...path.map(stepLabel)];
+export function breadcrumb(
+  rootLabel: string,
+  path: readonly PathStep[],
+  max = 80,
+  display = (text: string) => text,
+): string {
+  const parts = [display(rootLabel), ...path.map((step) => display(stepLabel(step)))];
   let text = parts.join(' › ');
   for (let keep = parts.length - 2; text.length > max && keep > 0; keep--) {
     text = [parts[0], '…', ...parts.slice(parts.length - keep)].join(' › ');

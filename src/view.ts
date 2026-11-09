@@ -107,37 +107,37 @@ export interface ViewExtras {
 /** Explorer keys per select page; the other two option slots are "previous" and "more". */
 const KEYS_PER_PAGE = 23;
 
-function status(session: Session, hasValue: boolean): string {
+function status(session: Session, hasValue: boolean, display: (text: string) => string): string {
   const extra = Array.isArray(session.data.status) ? (session.data.status as string[]) : [];
   if (session.live) {
     return statusLine(session.live.paused ? 'paused' : 'running', [
-      session.mode,
+      display(session.mode),
       formatDuration(Date.now() - session.live.startedAt),
-      ...extra,
+      ...extra.map(display),
     ]);
   }
   const total = session.pages.length;
   const { depth, hidden, getters, path } = session.view;
   return statusLine(session.ok, [
-    session.mode,
+    display(session.mode),
     formatDuration(session.ms),
     total > 1 && `page ${session.page + 1}/${total}`,
     hasValue && `depth ${depth}`,
     hasValue && (hidden || getters) && 'hidden + getters',
-    hasValue && path.length > 0 && breadcrumb('result', path, 70),
-    ...extra,
+    hasValue && path.length > 0 && breadcrumb('result', path, 70, display),
+    ...extra.map(display),
     session.pinned && '📌 kept',
   ]);
 }
 
-export function renderSession(session: Session, extras: ViewExtras): ByakuBody {
+export function renderSession(session: Session, extras: ViewExtras, display = (text: string) => text): ByakuBody {
   const sid = session.id;
   const ephemeral = session.ephemeral === true;
 
   const confirm = session.data.confirm as { reason: string } | undefined;
   if (confirm) {
     return plainBody(
-      `⚠️ **This ${session.mode} input ${confirm.reason}.** Run it?\n${codeBlock(escapeFences(truncate(session.input, 1500)), session.lang)}`,
+      `⚠️ **This ${display(session.mode)} input ${display(confirm.reason)}.** Run it?\n${codeBlock(escapeFences(truncate(display(session.input), 1500)), display(session.lang))}`,
       [
         new ActionRow<Button>().setComponents([
           button(sid, 'ok', '✅', { label: 'Confirm', style: ButtonStyle.Danger }),
@@ -150,11 +150,11 @@ export function renderSession(session: Session, extras: ViewExtras): ByakuBody {
 
   if (session.data.text === true) {
     const remove = button(sid, 'd', '🗑️', { style: ButtonStyle.Danger });
-    return plainBody(session.output, [new ActionRow<Button>().setComponents([remove])], ephemeral);
+    return plainBody(display(session.output), [new ActionRow<Button>().setComponents([remove])], ephemeral);
   }
 
   if (session.live) {
-    const content = `${codeBlock(escapeFences(lastPage(session.output)), session.lang)}\n${status(session, false)}`;
+    const content = `${codeBlock(escapeFences(lastPage(display(session.output))), display(session.lang))}\n${status(session, false, display)}`;
     const controls =
       session.live.kind === 'shell'
         ? [
@@ -215,31 +215,35 @@ export function renderSession(session: Session, extras: ViewExtras): ByakuBody {
 
   if (extras.hasValue) {
     if (extras.entries.length)
-      rows.push(new ActionRow<StringSelectMenu>().setComponents([explorerSelect(session, extras.entries)]));
+      rows.push(new ActionRow<StringSelectMenu>().setComponents([explorerSelect(session, extras.entries, display)]));
     rows.push(new ActionRow<StringSelectMenu>().setComponents([depthSelect(session)]));
   }
 
   return plainBody(
-    `${codeBlock(escapeFences(page), session.lang)}\n${status(session, extras.hasValue)}`,
+    `${codeBlock(escapeFences(display(page)), display(session.lang))}\n${status(session, extras.hasValue, display)}`,
     rows,
     ephemeral,
   );
 }
 
-function explorerSelect(session: Session, entries: readonly ExplorerEntry[]): StringSelectMenu {
+function explorerSelect(
+  session: Session,
+  entries: readonly ExplorerEntry[],
+  display: (text: string) => string,
+): StringSelectMenu {
   const pages = Math.ceil(entries.length / KEYS_PER_PAGE);
   const keyPage = Math.min(Math.max(0, session.view.keyPage), pages - 1);
   const offset = keyPage * KEYS_PER_PAGE;
   const options = entries.slice(offset, offset + KEYS_PER_PAGE).map((entry, i) =>
     new StringSelectOption()
-      .setLabel(truncate(entry.label || '(empty)', 100))
+      .setLabel(truncate(display(entry.label) || '(empty)', 100))
       .setValue(`k${offset + i}`)
-      .setDescription(truncate(entry.description, 100)),
+      .setDescription(truncate(display(entry.description), 100)),
   );
   if (keyPage > 0) options.unshift(new StringSelectOption().setLabel('Previous keys').setValue('kp').setEmoji('◀️'));
   if (keyPage < pages - 1) options.push(new StringSelectOption().setLabel('More keys').setValue('kn').setEmoji('▶️'));
 
-  const where = session.view.path.length ? breadcrumb('result', session.view.path, 60) : 'result';
+  const where = session.view.path.length ? breadcrumb('result', session.view.path, 60, display) : 'result';
   const pageInfo = pages > 1 ? `, page ${keyPage + 1}/${pages}` : '';
   return new StringSelectMenu()
     .setCustomId(customId(session.id, 'xk'))
@@ -289,17 +293,24 @@ export function gotoModal(session: Session): Modal {
     .addComponents(field(`Page (1-${session.pages.length})`, input));
 }
 
-export function editModal(session: Session): Modal {
+export function editModal(session: Session, display = (text: string) => text): Modal {
+  const containsSecret = display(session.input) !== session.input;
   const input = new TextInput()
     .setCustomId(INPUT.code)
     .setStyle(TextInputStyle.Paragraph)
     .setLength({ min: 1, max: 4000 })
-    .setValue(truncate(session.input, 4000))
     .setRequired(true);
+  if (!containsSecret) input.setValue(truncate(session.input, 4000));
   return new Modal()
     .setCustomId(customId(session.id, 'M', 'e'))
-    .setTitle(truncate(`Edit and run (${session.mode})`, 45))
-    .addComponents(field('Code', input));
+    .setTitle(truncate(`Edit and run (${display(session.mode)})`, 45))
+    .addComponents(
+      field(
+        'Code',
+        input,
+        containsSecret ? 'Input contains secrets. Enter new code, or close and use Re-run.' : undefined,
+      ),
+    );
 }
 
 export function stdinModal(session: Session): Modal {
@@ -315,7 +326,7 @@ export function stdinModal(session: Session): Modal {
 }
 
 /** The `/byaku` modal. The mode and visibility ride in the custom id, since a modal has no other state. */
-export function codeModal(mode: string, ephemeral: boolean): Modal {
+export function codeModal(mode: string, ephemeral: boolean, display = (text: string) => text): Modal {
   const code = new TextInput()
     .setCustomId(INPUT.code)
     .setStyle(TextInputStyle.Paragraph)
@@ -324,7 +335,7 @@ export function codeModal(mode: string, ephemeral: boolean): Modal {
   const upload = new FileUpload().setCustomId(INPUT.file).setMinValues(0).setMaxValues(1).setRequired(false);
   return new Modal()
     .setCustomId(customId('new', 'M', `code:${mode}:${ephemeral ? 'e' : 'p'}`))
-    .setTitle(truncate(`Byaku · ${mode}`, 45))
+    .setTitle(truncate(`Byaku · ${display(mode)}`, 45))
     .addComponents(
       field(mode === 'sh' ? 'Command' : 'Code', code, 'Leave empty to run an uploaded file instead.'),
       new Label().setLabel('Or upload a file').setDescription('A .js or .ts file (up to 1 MB).').setComponent(upload),

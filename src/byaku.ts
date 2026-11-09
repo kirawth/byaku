@@ -684,7 +684,7 @@ export class Byaku {
         : formatValue(current, { depth: session.view.depth, ...view });
     this.setOutput(session, this.redact(text));
     try {
-      return listEntries(current, view);
+      return listEntries(current, view, (text) => this.redact(text));
     } catch {
       return [];
     }
@@ -697,16 +697,22 @@ export class Byaku {
     let entries: ExplorerEntry[] = [];
     if (hasValue) {
       try {
-        entries = listEntries(resolvePath(live.value, session.view.path, session.view), session.view);
+        entries = listEntries(resolvePath(live.value, session.view.path, session.view), session.view, (text) =>
+          this.redact(text),
+        );
       } catch {
         entries = [];
       }
     }
-    return renderSession(session, {
-      rerunnable: this.registry.get(session.mode)?.rerunnable ?? false,
-      hasValue,
-      entries,
-    });
+    return renderSession(
+      session,
+      {
+        rerunnable: this.registry.get(session.mode)?.rerunnable ?? false,
+        hasValue,
+        entries,
+      },
+      (text) => this.redact(text),
+    );
   }
 
   private async deliver(session: Session, delivery: Delivery): Promise<void> {

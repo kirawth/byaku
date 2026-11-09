@@ -29,8 +29,10 @@ export function isByakuHandler(value: unknown): boolean {
   return typeof value === 'object' && value !== null && BYAKU_HANDLER in value;
 }
 
-function deny(ctx: ButtonOrSelect | ModalContext, content: string): Promise<unknown> {
-  return ctx.write({ content, flags: 64, allowed_mentions: { parse: [] } } as never).catch(() => undefined);
+function deny(byaku: Byaku, ctx: ButtonOrSelect | ModalContext, content: string): Promise<unknown> {
+  return ctx
+    .write({ content: byaku.redact(content), flags: 64, allowed_mentions: { parse: [] } } as never)
+    .catch(() => undefined);
 }
 
 function whereOf(ctx: ButtonOrSelect | ModalContext) {
@@ -55,8 +57,9 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
   if (!id) return;
   const userId = ctx.author.id;
   const session = id.sid === 'new' ? undefined : await byaku.sessions.get(id.sid);
-  if (!(await allowed(byaku, ctx, session, id.sid))) return deny(ctx, 'These controls belong to someone else.');
-  if (id.version !== 1) return deny(ctx, 'These controls are from an older Byaku version. Run the command again.');
+  if (!(await allowed(byaku, ctx, session, id.sid))) return deny(byaku, ctx, 'These controls belong to someone else.');
+  if (id.version !== 1)
+    return deny(byaku, ctx, 'These controls are from an older Byaku version. Run the command again.');
 
   const audit = (action: string, extra: Partial<AuditEntry> = {}) =>
     byaku.audit({ action, mode: session?.mode, userId, sessionId: id.sid, outcome: 'ok', ...whereOf(ctx), ...extra });
@@ -72,7 +75,7 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
       await ctx.update({ components: [] } as never);
       return audit('remove-controls');
     }
-    return deny(ctx, 'This session has ended. Run the command again.');
+    return deny(byaku, ctx, 'This session has ended. Run the command again.');
   }
 
   session.interactionToken = ctx.interaction.token;
@@ -82,7 +85,13 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
     await byaku.sessions.save(session);
     await ctx.update(byaku.render(session) as never);
   };
-  const reply = (body: object) => ctx.write({ flags: 64, allowed_mentions: { parse: [] }, ...body } as never);
+  const reply = (body: { content?: string; files?: AttachmentBuilder[] }) =>
+    ctx.write({
+      flags: 64,
+      allowed_mentions: { parse: [] },
+      ...body,
+      ...(body.content !== undefined ? { content: byaku.redact(body.content) } : {}),
+    } as never);
   const value = (ctx.interaction as { values?: string[] }).values?.[0] ?? '';
 
   switch (id.action) {
@@ -99,7 +108,7 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
     case 'g':
       return ctx.modal(gotoModal(session));
     case 'e':
-      return ctx.modal(editModal(session));
+      return ctx.modal(editModal(session, (text) => byaku.redact(text)));
     case 'in':
       return ctx.modal(stdinModal(session));
     case 'r':
@@ -109,8 +118,8 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
       audit('file');
       const ext = ['js', 'ts', 'json'].includes(session.lang) ? session.lang : 'txt';
       const file = new AttachmentBuilder()
-        .setName(`byaku-${session.mode}.${ext}`)
-        .setFile('buffer', Buffer.from(session.output));
+        .setName(byaku.redact(`byaku-${session.mode}.${ext}`))
+        .setFile('buffer', Buffer.from(byaku.redact(session.output)));
       return reply({
         content: `-# ${session.mode} · ${session.output.length.toLocaleString('en-US')} characters`,
         files: [file],
@@ -118,7 +127,9 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
     }
     case 'raw': {
       audit('raw');
-      const page = session.data.text === true ? session.output : (session.pages[session.page] ?? '').replace(/‍/g, '');
+      const page = byaku.redact(
+        session.data.text === true ? session.output : (session.pages[session.page] ?? '').replace(/‍/g, ''),
+      );
       if (page.length <= 1990) return reply({ content: page || ' ' });
       return reply({
         files: [new AttachmentBuilder().setName('byaku-page.txt').setFile('buffer', Buffer.from(page))],
@@ -126,7 +137,7 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
     }
     case 'df': {
       audit('diff');
-      const diff = diffLines(session.previousOutput ?? '', session.output);
+      const diff = diffLines(byaku.redact(session.previousOutput ?? ''), byaku.redact(session.output));
       return reply({
         content: `${codeBlock(truncate(escapeFences(diff.text), 1900), 'diff')}\n-# +${diff.added} −${diff.removed}`,
       });
@@ -174,7 +185,7 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
     case 'no':
       audit('cancel', { outcome: 'cancelled' });
       await byaku.endSession(session, 'cancelled');
-      return ctx.update(plainBody(`-# ✖️ Cancelled: ${session.mode}`, [], session.ephemeral) as never);
+      return ctx.update(plainBody(byaku.redact(`-# ✖️ Cancelled: ${session.mode}`), [], session.ephemeral) as never);
     case 'dp':
       if (value === 'h') {
         const on = !(session.view.hidden || session.view.getters);
@@ -194,9 +205,10 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
         return update();
       }
       const entry = entries[Number(value.slice(1))];
-      if (!entry) return deny(ctx, 'That key is no longer there.');
+      if (!entry) return deny(byaku, ctx, 'That key is no longer there.');
       if (entry.getter && !session.view.getters) {
         return deny(
+          byaku,
           ctx,
           `"${entry.label}" is a getter. Turn on "Show hidden keys and getters" in the depth menu to open it.`,
         );
@@ -215,7 +227,7 @@ async function handleComponent(byaku: Byaku, ctx: ButtonOrSelect): Promise<unkno
       audit('explore', { details: { depth: session.view.path.length } });
       return update();
     default:
-      return deny(ctx, 'Unknown control.');
+      return deny(byaku, ctx, 'Unknown control.');
   }
 }
 
@@ -229,9 +241,9 @@ async function handleModal(byaku: Byaku, ctx: ModalContext): Promise<unknown> {
   if (id?.action !== 'M') return;
   const kind = id.arg ?? '';
   const session = id.sid === 'new' ? undefined : await byaku.sessions.get(id.sid);
-  if (!(await allowed(byaku, ctx, session, id.sid))) return deny(ctx, 'This belongs to someone else.');
+  if (!(await allowed(byaku, ctx, session, id.sid))) return deny(byaku, ctx, 'This belongs to someone else.');
   if (kind.startsWith('code:')) return runCodeModal(byaku, ctx, kind);
-  if (!session) return deny(ctx, 'This session has ended. Run the command again.');
+  if (!session) return deny(byaku, ctx, 'This session has ended. Run the command again.');
 
   session.interactionToken = ctx.interaction.token;
   session.data.tokenAt = Date.now();
@@ -248,7 +260,7 @@ async function handleModal(byaku: Byaku, ctx: ModalContext): Promise<unknown> {
 
   if (kind === 'g') {
     const page = Number.parseInt(inputValue(ctx, INPUT.page), 10);
-    if (!Number.isFinite(page)) return deny(ctx, `Type a page number from 1 to ${session.pages.length}.`);
+    if (!Number.isFinite(page)) return deny(byaku, ctx, `Type a page number from 1 to ${session.pages.length}.`);
     session.page = Math.max(0, Math.min(session.pages.length - 1, page - 1));
     await byaku.sessions.touch(session);
     audit('page');
@@ -258,19 +270,19 @@ async function handleModal(byaku: Byaku, ctx: ModalContext): Promise<unknown> {
   }
   if (kind === 'e') {
     const code = inputValue(ctx, INPUT.code).trim();
-    if (!code) return deny(ctx, 'Nothing to run.');
+    if (!code) return deny(byaku, ctx, 'Nothing to run.');
     await ctx.deferUpdate();
     return byaku.rerun(session, ctx.author.id, `${session.mode} ${code}`, 'edit-run');
   }
   if (kind === 'in') {
     const onInput = byaku.lives.get(session.id)?.options.onInput;
-    if (!onInput) return deny(ctx, 'The command is no longer running.');
+    if (!onInput) return deny(byaku, ctx, 'The command is no longer running.');
     const text = inputValue(ctx, INPUT.stdin);
     onInput(`${text}\n`);
     audit('stdin', { codeLength: text.length });
     return ctx.deferUpdate();
   }
-  return deny(ctx, 'Unknown form.');
+  return deny(byaku, ctx, 'Unknown form.');
 }
 
 async function runCodeModal(byaku: Byaku, ctx: ModalContext, kind: string): Promise<unknown> {
@@ -278,10 +290,10 @@ async function runCodeModal(byaku: Byaku, ctx: ModalContext, kind: string): Prom
   let code = inputValue(ctx, INPUT.code).trim();
   const file = ctx.getFiles(INPUT.file)?.[0];
   if (!code && file) {
-    if (!/\.(m?js|cjs|ts|mts|cts|txt|sh)$/i.test(file.filename)) return deny(ctx, 'Upload a .js or .ts file.');
-    if (file.size > 1_048_576) return deny(ctx, 'The file is larger than 1 MB.');
+    if (!/\.(m?js|cjs|ts|mts|cts|txt|sh)$/i.test(file.filename)) return deny(byaku, ctx, 'Upload a .js or .ts file.');
+    if (file.size > 1_048_576) return deny(byaku, ctx, 'The file is larger than 1 MB.');
   }
-  if (!code && !file) return deny(ctx, 'Type some code or upload a file.');
+  if (!code && !file) return deny(byaku, ctx, 'Type some code or upload a file.');
   await ctx.deferReply(visibility === 'e');
   if (!code && file) {
     try {
@@ -311,7 +323,7 @@ async function handleCommand(byaku: Byaku, ctx: CommandContext): Promise<unknown
     byaku.audit({ action: 'denied', userId, outcome: 'denied', channelId: ctx.channelId });
     return message
       ? undefined
-      : ctx.write({ content: 'Byaku is owner-only.', flags: 64 } as never).catch(() => undefined);
+      : ctx.write({ content: byaku.redact('Byaku is owner-only.'), flags: 64 } as never).catch(() => undefined);
   }
 
   if (message) {
@@ -330,7 +342,12 @@ async function handleCommand(byaku: Byaku, ctx: CommandContext): Promise<unknown
   }
 
   const options = ctx.options as { mode?: string; ephemeral?: boolean };
-  return ctx.modal(codeModal(byaku.registry.resolve(options.mode ?? 'js') ?? 'js', options.ephemeral ?? true) as never);
+  const mode = byaku.registry.resolve(options.mode ?? 'js') ?? 'js';
+  if (byaku.redact(mode) !== mode)
+    return ctx.write(
+      plainBody('This mode contains a secret. Run it through a message trigger instead.', [], true) as never,
+    );
+  return ctx.modal(codeModal(mode, options.ephemeral ?? true, (text) => byaku.redact(text)) as never);
 }
 
 async function suggestModes(byaku: Byaku, interaction: AutocompleteInteraction): Promise<void> {
@@ -338,8 +355,13 @@ async function suggestModes(byaku: Byaku, interaction: AutocompleteInteraction):
   const typed = String(interaction.getInput() ?? '').toLowerCase();
   const choices = byaku.registry
     .list()
-    .filter((m) => m.name !== 'summary' && (m.name.includes(typed) || m.description.toLowerCase().includes(typed)))
-    .map((m) => ({ name: truncate(`${m.name} · ${m.description}`, 100), value: m.name }));
+    .filter(
+      (m) =>
+        m.name !== 'summary' &&
+        byaku.redact(m.name) === m.name &&
+        (m.name.includes(typed) || m.description.toLowerCase().includes(typed)),
+    )
+    .map((m) => ({ name: truncate(byaku.redact(`${m.name} · ${m.description}`), 100), value: m.name }));
   return interaction.respond(choices.slice(0, 25));
 }
 
