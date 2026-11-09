@@ -8,6 +8,7 @@ concurrency: release-${{ github.ref }}
 
 permissions:
   contents: write
+  # npm trusted publishing: the job proves who it is with an OIDC token, no npm secret needed
   id-token: write
   pull-requests: write
 
@@ -21,7 +22,8 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or newer; Node 22 ships with npm 10
+      - run: npm install -g npm@11
       - run: npm ci
       # With pending changesets this opens a "Version packages" pull request;
       # once that is merged, it publishes the new version to npm with provenance.
@@ -33,5 +35,3 @@ jobs:
           commit: 'chore: version packages'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
