@@ -226,6 +226,7 @@ export class Byaku {
   /**
    * Connects Byaku to the client: a raw gateway listener (your `messageCreate` keeps working), the buttons
    * and modals (next to yours), the prefix guard, the worker bridge and `/byaku` if `slash` is set.
+   * Without `byakuPlugin()`, call this after `client.start()` so file loading doesn't replace `/byaku`.
    */
   async install(): Promise<void> {
     if (this.installed) return;
@@ -259,7 +260,7 @@ export class Byaku {
       const { ByakuButtons, ByakuSelects, ByakuModal } = this.handlerClasses;
       client.components.set([new ByakuButtons(), new ByakuSelects(), new ByakuModal()]);
     }
-    if (this.options.slash && !client.commands.values.some(isByakuHandler)) {
+    if (!this.plugin && this.options.slash && !client.commands.values.some(isByakuHandler)) {
       const command = new (createSlashCommand(this))();
       if (this.options.slash.guilds) command.guildId = [...this.options.slash.guilds];
       client.commands.set([command as never]);

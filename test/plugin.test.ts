@@ -1,9 +1,51 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, relative } from 'node:path';
+
 import { Command, type CommandContext, InteractionContextType } from 'seyfert';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { Byaku } from '../src/byaku.js';
 import { byakuPlugin } from '../src/plugin.js';
-import { FakeBot } from './helpers.js';
+import { FakeBot, OWNER_ID, TOKEN } from './helpers.js';
+
+const cleanup: (() => Promise<unknown>)[] = [];
+afterEach(async () => {
+  for (const dispose of cleanup.splice(0).reverse()) await dispose();
+});
+
+async function commandsDirectory() {
+  const dir = await mkdtemp(join(tmpdir(), 'byaku-commands-'));
+  cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'package.json'), JSON.stringify({ type: 'module' }));
+  await writeFile(
+    join(dir, 'ping.js'),
+    `import { Command, InteractionContextType } from ${JSON.stringify(import.meta.resolve('seyfert'))};
+export default class Ping extends Command {
+  constructor() {
+    super();
+    this.name = 'ping';
+    this.description = 'Replies with pong';
+    this.contexts = [InteractionContextType.Guild];
+  }
+  async run(ctx) { await ctx.write({ content: 'pong' }); }
+}
+`,
+  );
+  return dir;
+}
+
+function fileLoaderOptions(commands: string) {
+  return {
+    getRC: () =>
+      ({
+        token: TOKEN,
+        intents: 0,
+        debug: false,
+        locations: { base: '.', commands: relative(process.cwd(), commands) },
+      }) as never,
+  };
+}
 
 class Fail extends Command {
   constructor() {
@@ -18,12 +60,76 @@ class Fail extends Command {
 }
 
 describe('byakuPlugin()', () => {
+  it.each([true, { guilds: ['400000000000000004'] }])(
+    'keeps file-loaded commands and the slash contribution through startup (%j)',
+    async (slash) => {
+      const commands = await commandsDirectory();
+      const bot = await FakeBot.create({
+        clientOptions: {
+          ...fileLoaderOptions(commands),
+          plugins: [byakuPlugin({ slash, owners: [OWNER_ID], advanced: { includeAppOwners: false } })] as never,
+        },
+      });
+      cleanup.push(() => bot.client.close());
+      const byaku = (bot.client as unknown as { byaku: Byaku }).byaku;
+      await byaku.install();
+      await byaku.install();
+      expect(bot.client.commands.values.map((c) => c.name).sort()).toEqual(['byaku', 'ping']);
+      expect(bot.client.commands.values.find((c) => c.name === 'byaku')?.guildId).toEqual(
+        typeof slash === 'object' ? slash.guilds : undefined,
+      );
+
+      const ping = await bot.slash('ping');
+      expect(bot.callbacks(ping)).toMatchObject([{ type: 4, data: { content: 'pong' } }]);
+      const token = await bot.slash('byaku');
+      expect(bot.callbacks(token)).toMatchObject([{ type: 9, data: { custom_id: 'by1:new:M:code:js:e' } }]);
+
+      await bot.client.start({}, false);
+      expect(bot.client.commands.values.map((c) => c.name).sort()).toEqual(['byaku', 'ping']);
+
+      await bot.client.close();
+      expect(bot.client.commands.values.map((c) => c.name)).toEqual(['ping']);
+      await bot.client.start({}, false);
+      expect(bot.client.commands.values.map((c) => c.name).sort()).toEqual(['byaku', 'ping']);
+    },
+  );
+
+  it('does not contribute a slash command when slash is false', async () => {
+    const commands = await commandsDirectory();
+    const bot = await FakeBot.create({
+      clientOptions: {
+        ...fileLoaderOptions(commands),
+        plugins: [byakuPlugin({ slash: false, advanced: { includeAppOwners: false } })] as never,
+      },
+    });
+    cleanup.push(() => bot.client.close());
+    expect(bot.client.commands.values.map((c) => c.name)).toEqual(['ping']);
+  });
+
+  it('supports manual installation after file-loaded startup without duplicate slash commands', async () => {
+    const commands = await commandsDirectory();
+    const bot = await FakeBot.create({ clientOptions: fileLoaderOptions(commands) });
+    const byaku = new Byaku(bot.client, {
+      slash: { guilds: ['400000000000000004'] },
+      owners: [OWNER_ID],
+      advanced: { includeAppOwners: false },
+    });
+    cleanup.push(() => byaku.uninstall());
+    await byaku.install();
+    await byaku.install();
+    expect(bot.client.commands.values.map((c) => c.name).sort()).toEqual(['byaku', 'ping']);
+    expect(bot.client.commands.values.find((c) => c.name === 'byaku')?.guildId).toEqual(['400000000000000004']);
+    const token = await bot.slash('byaku');
+    expect(bot.callbacks(token)).toMatchObject([{ type: 9 }]);
+  });
+
   it('adds client.byaku, installs on start, and feeds command and REST observers', async () => {
     const plugin = byakuPlugin({ prefixes: ['?by'] });
     const bot = await FakeBot.create({
       clientOptions: { plugins: [plugin] as never },
       setup: (client) => void client.commands.set([Fail] as never),
     });
+    cleanup.push(() => bot.client.close());
     const byaku = (bot.client as unknown as { byaku: Byaku }).byaku;
     expect(byaku).toBeInstanceOf(Byaku);
     expect(byaku.plugin).toBeDefined();
