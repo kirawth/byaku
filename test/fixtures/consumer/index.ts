@@ -1,6 +1,7 @@
 // Type-checks Byaku's published .d.ts files the way a bot uses them.
 // scripts/check-package.mjs copies this file into a fresh project and type-checks it with TypeScript 5.4 and 5.9.
 import { Client, definePlugins, type UsingClient } from 'seyfert';
+import { HandleCommand } from 'seyfert/lib/commands/handle.js';
 import {
   type AuditEntry,
   createByakuClasses,
@@ -53,7 +54,8 @@ export async function withInstall(client: Client): Promise<void> {
   const handled: boolean = await byaku.handleMessage({} as never);
   const typed = Object.assign(client, { byaku }) as ByakuClient<typeof client>;
   typed.byaku.disable();
-  void handled;
+  const skip: boolean = await byaku.shouldSkipMessageCommand({ id: '1', channel_id: '2', content: '?by 42' });
+  void [handled, skip];
 
   const { ByakuComponents, ByakuModals, ByakuCommand } = createByakuClasses(byaku);
   void [ByakuComponents, ByakuModals, ByakuCommand];
@@ -74,6 +76,13 @@ declare module 'seyfert' {
 
 export function withPlugin(): void {
   const client = new Client({ plugins });
+  class BotCommands extends HandleCommand {
+    override async message(raw: Parameters<HandleCommand['message']>[0], shardId: number) {
+      if (await client.byaku.shouldSkipMessageCommand(raw)) return;
+      return super.message(raw, shardId);
+    }
+  }
+  client.setServices({ handleCommand: BotCommands });
   // `byaku` comes from the plugin's client map
   const byaku: Byaku = client.byaku;
   const used: UsingClient = client;

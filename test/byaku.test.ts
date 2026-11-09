@@ -1,14 +1,14 @@
-import { Command, type CommandContext, InteractionContextType, SubCommand, type MessageStructure } from 'seyfert';
+import { type Client, Command, type CommandContext, InteractionContextType, SubCommand } from 'seyfert';
+import { HandleCommand } from 'seyfert/lib/commands/handle.js';
 import { describe, expect, it, vi } from 'vitest';
 import { Shortcut, Yuna } from 'yunaforseyfert';
 
-import { Byaku, guardPrefix, syntheticMessage, unguardPrefix } from '../src/byaku.js';
+import { Byaku, syntheticMessage } from '../src/byaku.js';
 import { createByakuClasses } from '../src/plugin.js';
 import { BOT_ID, CHANNEL_ID, FakeBot, OWNER_ID } from './helpers.js';
 
 // Commands made without @Declare have no contexts; Seyfert then never runs them from messages
 const BOTH = [InteractionContextType.Guild, InteractionContextType.BotDM];
-const msg = (content: string) => ({ content, guildId: '1' }) as unknown as MessageStructure;
 const posts = (bot: FakeBot) =>
   bot.calls.filter((c) => c.method === 'POST' && /\/channels\/\d+\/messages$/.test(c.url));
 
@@ -27,50 +27,24 @@ function commandNamed(name: string, ran: string[]) {
   };
 }
 
-describe('guardPrefix (unit)', () => {
-  const isByaku = (m: MessageStructure, prefixes: readonly string[]) =>
-    prefixes.some((p) => (m as unknown as { content: string }).content.startsWith(`${p}by `));
+function routeWith(client: Client, byaku: () => Byaku | undefined) {
+  class Router extends HandleCommand {
+    override async message(raw: Parameters<HandleCommand['message']>[0], shardId: number) {
+      if (await byaku()?.shouldSkipMessageCommand(raw)) return;
+      return super.message(raw, shardId);
+    }
+  }
+  client.setServices({ handleCommand: Router });
+}
 
-  it('returns the very same array for other messages (sync stays sync)', () => {
-    const list = ['!', '?'];
-    const guarded = guardPrefix(() => list, isByaku);
-    const out = guarded(msg('?ping'));
-    expect(out).toBe(list);
-  });
-
-  it('returns [] for Byaku messages', () => {
-    const guarded = guardPrefix(() => ['?'], isByaku);
-    expect(guarded(msg('?by js 1'))).toEqual([]);
-  });
-
-  it('async prefix functions stay async and keep their result', async () => {
-    const list = ['?', `<@${BOT_ID}> `];
-    const guarded = guardPrefix(async () => list, isByaku);
-    const out = guarded(msg(`<@${BOT_ID}> ping`));
-    expect(out).toBeInstanceOf(Promise);
-    expect(await out).toBe(list);
-    expect(await guarded(msg('?by x'))).toEqual([]);
-  });
-
-  it('never wraps twice and can be undone; a failing check returns the original result', () => {
-    const original = () => ['?'];
-    const once = guardPrefix(original, isByaku);
-    const twice = guardPrefix(once, isByaku);
-    expect(unguardPrefix(twice)).toBe(original);
-    const broken = guardPrefix(original, () => {
-      throw new Error('boom');
-    });
-    expect(broken(msg('?by 1'))).toEqual(['?']);
-  });
-});
-
-describe('prefix guard with a real client', () => {
+describe('explicit prefix routing with a real client', () => {
   it('a bot command named "by" does not also run on "?by …"; other commands still work', async () => {
     const ran: string[] = [];
     const bot = await FakeBot.create({
       setup: (client) => void client.commands.set([commandNamed('by', ran), commandNamed('ping', ran)] as never),
     });
     const byaku = new Byaku(bot.client, { prefixes: ['?by'] });
+    routeWith(bot.client, () => byaku);
     await byaku.install();
 
     const trigger = await bot.send('?by 1 + 1');
@@ -146,18 +120,24 @@ describe('yunaforseyfert', () => {
 
   async function yunaBot() {
     ran.length = 0;
+    const holder: { byaku?: Byaku } = {};
     const bot = await FakeBot.create({
       clientOptions: { plugins: [Yuna.plugin({ parser: true, resolver: true })] as never },
-      setup: (client) => void client.commands.set([Tools, commandNamed('by', ran)] as never),
+      setup: (client) => {
+        routeWith(client, () => holder.byaku);
+        client.commands.set([Tools, commandNamed('by', ran)] as never);
+      },
     });
     // Yuna indexes commands when Seyfert loads them from files; commands set by hand need this
     await Yuna.commands.prepare(bot.client as never);
-    return bot;
+    const byaku = new Byaku(bot.client, { prefixes: ['?by'] });
+    holder.byaku = byaku;
+    await byaku.install();
+    return { bot, byaku };
   }
 
   it("Yuna's resolver and @Shortcut keep working, and the guard still stops `by`", async () => {
-    const bot = await yunaBot();
-    await new Byaku(bot.client, { prefixes: ['?by'] }).install();
+    const { bot } = await yunaBot();
     await bot.send('?tools echo');
     await bot.send('?echo');
     expect(ran).toEqual([`echo:${OWNER_ID}`, `echo:${OWNER_ID}`]);
@@ -167,9 +147,7 @@ describe('yunaforseyfert', () => {
   });
 
   it('a synthetic message goes through Yuna and the middlewares, and Byaku ignores it', async () => {
-    const bot = await yunaBot();
-    const byaku = new Byaku(bot.client, { prefixes: ['?by'] });
-    await byaku.install();
+    const { bot, byaku } = await yunaBot();
     const base = await bot.send('?by 1');
     await bot.waitFor(() => bot.reply(base.id));
     const other = { id: '777000000000000001', username: 'other', discriminator: '0' };

@@ -100,7 +100,7 @@ export interface ByakuOptions {
     enabled?: boolean;
     /** Allow the application owner or team members. Default true. */
     includeAppOwners?: boolean;
-    /** Make Seyfert ignore Byaku's triggers, so a bot command named `by` doesn't also run. Default true. */
+    /** Reserve triggers through shouldSkipMessageCommand() in your command router. Default true. */
     prefixGuard?: boolean;
     timeouts?: { session?: Duration; shell?: Duration; editRerun?: Duration };
     limits?: { pageSize?: number; catBytes?: number; curlBytes?: number };

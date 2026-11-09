@@ -33,7 +33,7 @@ npm 10 crashes while resolving one of the test runner's optional peers; it only 
 ```
 src/
   index.ts        public exports
-  byaku.ts        the Byaku class: install, triggers, owners, prefix guard, running modes, sending replies
+  byaku.ts        the Byaku class: install, triggers, owners, prefix routing, running modes, sending replies
   options.ts      options, validation, defaults, ByakuError, durations
   parse.ts        triggers, flags, code fences, the tokenizer, confirm rules
   output.ts       code blocks, escaping, pagination, diff, redaction
@@ -54,8 +54,9 @@ scripts/          the package check
 ### How a run works
 
 A `raw` gateway collector sees every new, edited and deleted message. Seyfert doesn't wait for collectors, so a long
-run never blocks the bot. When a message starts with a trigger and comes from an owner, `Byaku.run()` parses it
-(mode, flags, code), asks for confirmation if the input looks risky, runs the mode and sends or edits the reply.
+run never blocks the bot. A bot's command handler calls `shouldSkipMessageCommand(raw)` before parsing to
+reserve triggers without replacing its prefix function. When a message starts with a trigger and comes from an
+owner, `Byaku.run()` parses it (mode, flags, code), asks for confirmation if the input looks risky, runs the mode and sends or edits the reply.
 
 Each run is a **session**: plain JSON data (input, output, pages, view settings) kept in a `SessionStore`, plus
 what can't be stored (the JavaScript value for the explorer, the abort controller) kept in memory next to it.
