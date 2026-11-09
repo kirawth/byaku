@@ -344,11 +344,15 @@ async function suggestModes(byaku: Byaku, interaction: AutocompleteInteraction):
 }
 
 export interface ByakuHandlerClasses {
-  /** For a components file: `export default createByakuClasses(byaku).ByakuComponents`. */
+  /** Constructor array for direct `client.components.set()`, not a file-loader default export. */
   ByakuComponents: (new () => ComponentCommand)[];
+  /** Constructor array for direct `client.components.set()`, not a file-loader default export. */
   ByakuModals: (new () => ModalCommand)[];
+  /** Default-export from a component file to handle buttons. */
   ByakuButtons: new () => ComponentCommand;
+  /** Default-export from a separate component file to handle selects. */
   ByakuSelects: new () => ComponentCommand;
+  /** Default-export from a separate component file to handle modals. */
   ByakuModal: new () => ModalCommand;
 }
 
