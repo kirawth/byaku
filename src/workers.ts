@@ -1,4 +1,4 @@
-import type { UsingClient } from 'seyfert';
+import type { UsingClient, WorkerClient } from 'seyfert';
 
 import { errorMessage } from './inspect.js';
 
@@ -21,18 +21,8 @@ export interface WorkerResult extends BridgeReply {
   timedOut?: boolean;
 }
 
-// WorkerClient's extra members aren't on `UsingClient`
-interface WorkerClientLike {
-  workerData?: { totalWorkers?: number; workerId?: number };
-  tellWorker?: (
-    workerId: number,
-    func: (...args: never[]) => unknown,
-    vars: Record<string, unknown>,
-  ) => Promise<unknown>;
-}
-
-// `typeof globalThis` has no symbol index signature
-const globals = globalThis as unknown as Record<symbol, BridgeHandler | undefined>;
+// The bridge owns only this symbol; do not give all globals a bridge-handler index signature.
+const globals = globalThis as typeof globalThis & { [BRIDGE_KEY]?: BridgeHandler };
 
 export function installBridge(handler: BridgeHandler): void {
   globals[BRIDGE_KEY] = handler;
@@ -51,23 +41,28 @@ const REMOTE = new Function(
   'vars',
   `var handle = globalThis[Symbol.for('byaku.bridge')];
    return handle ? handle(vars) : { ok: false, text: 'Byaku is not installed on worker ' + client.workerId };`,
-) as (...args: never[]) => unknown;
+) as (client: WorkerClient, vars: BridgeRequest) => Promise<BridgeReply> | BridgeReply;
 
-function asWorker(client: UsingClient): WorkerClientLike | undefined {
-  const c = client as unknown as WorkerClientLike;
-  return typeof c.tellWorker === 'function' && typeof c.workerData?.totalWorkers === 'number' ? c : undefined;
-}
-
-export function isWorkerClient(client: UsingClient): boolean {
-  return asWorker(client) !== undefined;
+export function isWorkerClient(
+  client: UsingClient,
+): client is UsingClient & Pick<WorkerClient, 'tellWorker' | 'workerData'> {
+  return (
+    'tellWorker' in client &&
+    typeof client.tellWorker === 'function' &&
+    'workerData' in client &&
+    typeof client.workerData === 'object' &&
+    client.workerData !== null &&
+    'totalWorkers' in client.workerData &&
+    typeof client.workerData.totalWorkers === 'number'
+  );
 }
 
 export function currentWorkerId(client: UsingClient): number {
-  return asWorker(client)?.workerData?.workerId ?? 0;
+  return isWorkerClient(client) ? (client.workerData.workerId ?? 0) : 0;
 }
 
 export function totalWorkers(client: UsingClient): number {
-  return asWorker(client)?.workerData?.totalWorkers ?? 1;
+  return isWorkerClient(client) ? client.workerData.totalWorkers : 1;
 }
 
 /** Runs a request on one worker, waiting at most `timeoutMs`. This worker is asked directly. Never rejects. */
@@ -86,7 +81,7 @@ export async function askWorker(
   });
 
   let call: Promise<unknown>;
-  const worker = asWorker(client);
+  const worker = isWorkerClient(client) ? client : undefined;
   if (workerId === currentWorkerId(client)) {
     const handler = globals[BRIDGE_KEY];
     if (!handler) return result({ ok: false, text: 'Byaku is not installed on this worker' });

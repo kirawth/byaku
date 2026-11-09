@@ -2,6 +2,8 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
+import { Client } from 'seyfert';
+
 import { VERSION } from '../options.js';
 import { discordTimestamp, formatBytes, formatMs, table } from '../output.js';
 import { splitFirst } from '../parse.js';
@@ -11,12 +13,9 @@ import type { ByakuModeDefinition, ModeOutput } from './index.js';
 const loopDelay = monitorEventLoopDelay({ resolution: 20 });
 loopDelay.enable();
 
-// Seyfert's cache and gateway members differ between Client and WorkerClient, and `UsingClient` has neither
-interface ClientInternals {
-  cache: Record<string, { count?: (guild?: string) => unknown } | undefined>;
-  workerData?: { shards?: number[]; totalShards?: number };
-  gateway?: Map<number, { latency: number; isOpen: boolean }> & { totalShards?: number };
-  latency?: number;
+// UsingClient may be registered as WorkerClient, whose private members conflict with Client's.
+function gatewayOf(client: object): Client['gateway'] | undefined {
+  return client instanceof Client ? client.gateway : undefined;
 }
 
 function seyfertVersion(): string {
@@ -55,7 +54,7 @@ const shards: ByakuModeDefinition = {
   usage: 'shards',
   async run(ctx) {
     if (!isWorkerClient(ctx.client)) {
-      const { gateway } = ctx.client as unknown as ClientInternals;
+      const gateway = gatewayOf(ctx.client);
       const rows = [...(gateway?.entries() ?? [])].map(([id, shard]) => [
         id,
         shard.isOpen ? 'open' : 'closed',
@@ -79,7 +78,9 @@ export const systemModes: ByakuModeDefinition[] = [
     description: 'Versions, process, memory, shards and cache at a glance',
     rerunnable: false,
     async run(ctx) {
-      const client = ctx.client as unknown as ClientInternals;
+      const client = ctx.client;
+      const gateway = gatewayOf(client);
+      const latency = 'latency' in client && typeof client.latency === 'number' ? client.latency : undefined;
       const mem = process.memoryUsage();
       const started = Date.now() - process.uptime() * 1000;
       const [guilds, users, channels] = await Promise.all([
@@ -87,9 +88,9 @@ export const systemModes: ByakuModeDefinition[] = [
         count(() => client.cache.users?.count?.()),
         count(() => client.cache.channels?.count?.('*')),
       ]);
-      const where = isWorkerClient(ctx.client)
+      const where = isWorkerClient(client)
         ? `worker ${currentWorkerId(ctx.client)} of ${totalWorkers(ctx.client)} · shards ${client.workerData?.shards?.join(', ') ?? '-'} of ${client.workerData?.totalShards ?? '-'}`
-        : `shards ${client.gateway?.size ?? '-'} of ${client.gateway?.totalShards ?? '-'}`;
+        : `shards ${gateway?.size ?? '-'} of ${gateway?.totalShards ?? '-'}`;
       const lag =
         loopDelay.count > 0
           ? `${(loopDelay.mean / 1e6).toFixed(1)} ms avg, ${(loopDelay.percentile(99) / 1e6).toFixed(1)} ms p99`
@@ -100,7 +101,7 @@ export const systemModes: ByakuModeDefinition[] = [
           `**Byaku** \`v${VERSION}\` · Seyfert \`v${seyfertVersion()}\` · Node.js \`${process.version}\` on \`${process.platform} ${process.arch}\``,
           `Process started ${discordTimestamp(started, 'R')} (${discordTimestamp(started, 'f')}) · PID \`${process.pid}\``,
           `Memory: **${formatBytes(mem.rss)}** RSS · heap ${formatBytes(mem.heapUsed)} / ${formatBytes(mem.heapTotal)}`,
-          `Running ${where} · gateway ping ${formatMs(client.latency)}`,
+          `Running ${where} · gateway ping ${formatMs(latency)}`,
           `Cache: ${guilds} guilds · ${users} users · ${channels} channels`,
           `Event-loop lag: ${lag}`,
           '',

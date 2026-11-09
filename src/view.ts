@@ -5,6 +5,7 @@ import {
   FileUpload,
   Label,
   Modal,
+  MessageFlags,
   StringSelectMenu,
   StringSelectOption,
   TextInput,
@@ -66,7 +67,7 @@ export function parseCustomId(id: string): { version: number; sid: string; actio
 export interface ByakuBody {
   content: string;
   components: ActionRow<Button | StringSelectMenu>[];
-  flags: number;
+  flags: MessageFlags;
   embeds: [];
   allowed_mentions: { parse: [] };
 }
@@ -75,7 +76,8 @@ export function plainBody(content: string, components: ByakuBody['components'] =
   return {
     content: truncate(content, 2000),
     components,
-    flags: ephemeral ? 64 : 0,
+    // Seyfert's enum omits zero, which keeps plain replies free of inherited flags.
+    flags: ephemeral ? MessageFlags.Ephemeral : (0 as MessageFlags),
     embeds: [],
     allowed_mentions: { parse: [] },
   };
