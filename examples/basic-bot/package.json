@@ -1,0 +1,17 @@
+{
+  "name": "byaku-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file=.env --import tsx index.ts"
+  },
+  "dependencies": {
+    "byaku": "^1.0.0",
+    "seyfert": "^5.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
