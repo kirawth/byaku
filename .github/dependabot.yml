@@ -7,6 +7,23 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: development
+    ignore:
+      # Majors that need Node 22 or aren't supported by the rest of the toolchain yet
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+      - dependency-name: tsup
+        update-types: [version-update:semver-major]
+      - dependency-name: vitest
+        update-types: [version-update:semver-major]
+      - dependency-name: '@vitest/*'
+        update-types: [version-update:semver-major]
+      - dependency-name: '@changesets/cli'
+        update-types: [version-update:semver-major]
+      # Matches the minimum supported Node version
+      - dependency-name: '@types/node'
+        update-types: [version-update:semver-major]
+      # Tests pin the targeted version; the seyfert@latest CI job covers newer ones
+      - dependency-name: seyfert
   - package-ecosystem: github-actions
     directory: /
     schedule:
