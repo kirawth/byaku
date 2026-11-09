@@ -162,7 +162,13 @@ export function byakuPlugin(options: ByakuOptions = {}): ByakuPlugin {
         return next();
       });
     },
-    setup: (client) => byakuFor(client).install(),
+    setup: async (client, api) => {
+      const byaku = byakuFor(client);
+      if (byaku.options.slash) {
+        api?.commands.add(createSlashCommand(byaku), { guilds: byaku.options.slash.guilds ?? [] });
+      }
+      await byaku.install();
+    },
     teardown: async (client) => instances.get(client)?.uninstall(),
   });
 }

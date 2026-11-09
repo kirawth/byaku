@@ -50,6 +50,9 @@ import { Byaku } from 'byaku';
 await new Byaku(client, { owners: ['YOUR_USER_ID'] }).install();
 ```
 
+When using file-loaded commands, call `install()` after `client.start()` so loading doesn't replace `/byaku`.
+The plugin setup shown below installs Byaku automatically during startup.
+
 The application owner (or every member of the owning team) is allowed automatically; `owners` adds more accounts.
 
 **3. Type in Discord** (with your bot's prefix, here `?`)
