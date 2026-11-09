@@ -216,15 +216,51 @@ declare module 'seyfert' {
 const client = new Client({ plugins });
 ```
 
-**With Seyfert's file loaders**, export Byaku's classes from your own files:
+**With Seyfert's file loaders**, export one class per file. All files must share the same `byaku` instance
+from a module outside your loader directories:
 
 ```ts
-// src/components/byaku.ts
-import { createByakuClasses } from 'byaku';
-import { byaku } from '../byaku';
+// src/byaku.ts (client.ts exports your shared client without starting it)
+import { Byaku, createByakuClasses } from 'byaku';
+import { client } from './client';
 
-export default createByakuClasses(byaku).ByakuComponents;
+export const byaku = new Byaku(client, { owners: ['123456789012345678'] });
+export const classes = createByakuClasses(byaku);
 ```
+
+```ts
+// src/components/byaku-buttons.ts
+import { classes } from '../byaku';
+export default classes.ByakuButtons;
+```
+
+```ts
+// src/components/byaku-selects.ts
+import { classes } from '../byaku';
+export default classes.ByakuSelects;
+```
+
+```ts
+// src/components/byaku-modal.ts
+import { classes } from '../byaku';
+export default classes.ByakuModal;
+```
+
+Optionally add the command in your commands directory:
+
+```ts
+// src/commands/byaku.ts
+import { classes } from '../byaku';
+export default classes.ByakuCommand;
+```
+
+Configure Seyfert's component and command locations to load these files. After `await client.start()`, call
+`await byaku.install()` to enable message triggers and sessions; upload commands separately if using `/byaku`.
+Keep startup in a separate entry module so importing the shared client or Byaku instance does not start the bot.
+
+`ByakuComponents` and `ByakuModals` remain arrays of constructors for direct
+`client.components.set([...classes.ByakuComponents, ...classes.ByakuModals])` registration. Do not default-export
+these arrays from loader files: Seyfert 5.2.0 expects a single class per component file and silently ignores arrays.
 
 **If you route messages yourself**, call `await byaku.handleMessage(message)`; it resolves to `true` when the
 message was for Byaku.

@@ -168,12 +168,19 @@ export function byakuPlugin(options: ByakuOptions = {}): ByakuPlugin {
 }
 
 /**
- * Seyfert classes for bots that load components and commands from files. `install()` notices them and
- * doesn't add its own.
+ * Seyfert classes for file loaders: default-export one class per file, sharing the same Byaku instance.
+ * Load ByakuButtons, ByakuSelects and ByakuModal from separate component files; optionally load
+ * ByakuCommand from a command file. Call `install()` after client startup to enable triggers and sessions.
  *
  * @example
- * // src/components/byaku.ts
- * export default createByakuClasses(byaku).ByakuComponents;
+ * // src/components/byaku-buttons.ts
+ * export default createByakuClasses(byaku).ByakuButtons;
+ * // src/components/byaku-selects.ts
+ * export default createByakuClasses(byaku).ByakuSelects;
+ * // src/components/byaku-modal.ts
+ * export default createByakuClasses(byaku).ByakuModal;
+ * // src/commands/byaku.ts (optional)
+ * export default createByakuClasses(byaku).ByakuCommand;
  */
 export function createByakuClasses(byaku: Byaku): ByakuHandlerClasses & { ByakuCommand: new () => Command } {
   return { ...byaku.handlerClasses, ByakuCommand: createSlashCommand(byaku) };

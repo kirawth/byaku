@@ -133,6 +133,8 @@ try {
       dir,
     );
     console.log(`✔ import and require work (TypeScript ${version} project)`);
+    copyFileSync(join(root, 'test/fixtures/consumer/file-loader.mjs'), join(dir, 'file-loader.mjs'));
+    console.log(node(['file-loader.mjs'], dir).trim());
   }
 } finally {
   rmSync(tmp, { recursive: true, force: true });
