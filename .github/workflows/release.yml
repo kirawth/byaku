@@ -25,7 +25,7 @@ jobs:
       - run: npm ci
       # With pending changesets this opens a "Version packages" pull request;
       # once that is merged, it publishes the new version to npm with provenance.
-      - uses: changesets/action@v1
+      - uses: changesets/action@v2
         with:
           version: npx changeset version
           publish: npm run release
