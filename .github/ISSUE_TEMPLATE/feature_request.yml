@@ -1,0 +1,16 @@
+name: Feature request
+description: Suggest a mode or an improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would you like to do?
+      description: The problem or task, not just the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How could Byaku help?
+      description: For a new mode, show what you would type and what you'd expect back.
