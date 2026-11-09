@@ -77,6 +77,8 @@
     "lint": "eslint . && prettier --check . && knip",
     "format": "prettier --write .",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "changeset": "changeset",
     "release": "changeset publish"
   },
@@ -94,6 +96,7 @@
     "@eslint/js": "10.0.1",
     "@types/node": "20.19.43",
     "@typescript-eslint/utils": "8.72.1",
+    "@vitest/coverage-v8": "4.1.12",
     "eslint": "10.14.0",
     "eslint-config-prettier": "10.1.8",
     "eslint-import-resolver-typescript": "4.4.5",
@@ -104,6 +107,8 @@
     "sucrase": "3.35.1",
     "tsup": "8.5.1",
     "typescript": "6.0.3",
-    "typescript-eslint": "8.72.1"
+    "typescript-eslint": "8.72.1",
+    "vitest": "4.1.12",
+    "yunaforseyfert": "1.2.4"
   }
 }
