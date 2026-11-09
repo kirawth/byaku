@@ -1,4 +1,9 @@
+import { readFileSync } from 'node:fs';
+
 import { defineConfig } from 'tsup';
+
+// The version shown by the summary mode comes from package.json at build time
+const { version } = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')) as { version: string };
 
 export default defineConfig({
   entry: { index: 'src/index.ts', plugin: 'src/plugin.ts' },
@@ -12,4 +17,5 @@ export default defineConfig({
   treeshake: true,
   splitting: true,
   external: ['seyfert', 'sucrase'],
+  define: { BYAKU_VERSION: JSON.stringify(version) },
 });

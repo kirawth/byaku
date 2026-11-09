@@ -248,5 +248,7 @@ export function resolveOptions(options: ByakuOptions = {}): ResolvedOptions {
   };
 }
 
-/** Kept equal to package.json by a test. */
-export const VERSION = '1.0.0';
+declare const BYAKU_VERSION: string;
+
+/** The package version, filled in from package.json when the package is built. */
+export const VERSION: string = BYAKU_VERSION;
