@@ -25,7 +25,11 @@ type ButtonOrSelect = ComponentContext<'Button'> | ComponentContext<'StringSelec
 /** Marks Byaku's handler instances; Seyfert runs every matching component command, so they must not be added twice. */
 const BYAKU_HANDLER = Symbol.for('byaku.handler');
 
-export function isByakuHandler(value: unknown): boolean {
+export function handlerOwner(value: unknown): Byaku | undefined {
+  return isByakuHandler(value) ? value[BYAKU_HANDLER] : undefined;
+}
+
+export function isByakuHandler(value: unknown): value is { readonly [BYAKU_HANDLER]: Byaku } {
   return typeof value === 'object' && value !== null && BYAKU_HANDLER in value;
 }
 
@@ -295,6 +299,7 @@ async function runCodeModal(byaku: Byaku, ctx: ModalContext, kind: string): Prom
 
 /** As a slash command it opens the code modal; as a prefix command it runs the text like a trigger. */
 async function handleCommand(byaku: Byaku, ctx: CommandContext): Promise<unknown> {
+  if (!byaku.isInstalled) return;
   // `ctx.message` is typed `never` unless the bot declares prefix commands in its Seyfert registry
   const message = (ctx as unknown as { message?: MessageStructure }).message;
   const userId = ctx.author.id;
@@ -325,6 +330,7 @@ async function handleCommand(byaku: Byaku, ctx: CommandContext): Promise<unknown
 }
 
 async function suggestModes(byaku: Byaku, interaction: AutocompleteInteraction): Promise<void> {
+  if (!byaku.isInstalled) return interaction.respond([]);
   if (!(await byaku.isOwner(interaction.user.id))) return interaction.respond([]);
   const typed = String(interaction.getInput() ?? '').toLowerCase();
   const choices = byaku.registry
@@ -347,7 +353,10 @@ export function createHandlerClasses(byaku: Byaku): ByakuHandlerClasses {
   class ByakuButtons extends ComponentCommand {
     componentType = 'Button' as const;
     override customId = ID_PATTERN;
-    readonly [BYAKU_HANDLER] = true;
+    readonly [BYAKU_HANDLER] = byaku;
+    override filter(ctx: ComponentContext<'Button'>) {
+      return byaku.acceptsInteraction(ctx.customId);
+    }
     override run(ctx: ComponentContext<'Button'>) {
       return handleComponent(byaku, ctx);
     }
@@ -356,7 +365,10 @@ export function createHandlerClasses(byaku: Byaku): ByakuHandlerClasses {
   class ByakuSelects extends ComponentCommand {
     componentType = 'StringSelect' as const;
     override customId = ID_PATTERN;
-    readonly [BYAKU_HANDLER] = true;
+    readonly [BYAKU_HANDLER] = byaku;
+    override filter(ctx: ComponentContext<'StringSelect'>) {
+      return byaku.acceptsInteraction(ctx.customId);
+    }
     override run(ctx: ComponentContext<'StringSelect'>) {
       return handleComponent(byaku, ctx);
     }
@@ -364,7 +376,10 @@ export function createHandlerClasses(byaku: Byaku): ByakuHandlerClasses {
 
   class ByakuModal extends ModalCommand {
     override customId = ID_PATTERN;
-    readonly [BYAKU_HANDLER] = true;
+    readonly [BYAKU_HANDLER] = byaku;
+    override filter(ctx: ModalContext) {
+      return byaku.acceptsInteraction(ctx.customId);
+    }
     override run(ctx: ModalContext) {
       return handleModal(byaku, ctx);
     }
@@ -381,7 +396,7 @@ export function createHandlerClasses(byaku: Byaku): ByakuHandlerClasses {
 
 export function createSlashCommand(byaku: Byaku): new () => Command {
   return class ByakuCommand extends Command {
-    readonly [BYAKU_HANDLER] = true;
+    readonly [BYAKU_HANDLER] = byaku;
 
     constructor() {
       super();

@@ -100,6 +100,7 @@ export function newSessionId(): string {
 export class SessionManager {
   readonly store: SessionStore;
   private readonly states = new Map<string, LiveState>();
+  private readonly idPrefix: string;
   private readonly ttlMs: number;
   private readonly onExpire: ((session: Session) => unknown) | undefined;
   private readonly now: () => number;
@@ -107,10 +108,12 @@ export class SessionManager {
 
   constructor(options: {
     ttlMs: number;
+    idPrefix?: string;
     store?: SessionStore;
     onExpire?: (session: Session) => unknown;
     now?: () => number;
   }) {
+    this.idPrefix = options.idPrefix ?? '';
     this.store = options.store ?? new MemorySessionStore();
     this.ttlMs = options.ttlMs;
     this.onExpire = options.onExpire;
@@ -132,7 +135,7 @@ export class SessionManager {
       data: {},
       ...init,
       view: { depth: 1, hidden: false, getters: false, path: [], keyPage: 0, ...init.view },
-      id: newSessionId(),
+      id: `${this.idPrefix}${newSessionId()}`,
       expiresAt: now + this.ttlMs,
     };
     await this.store.set(session);

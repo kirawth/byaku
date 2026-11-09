@@ -25,6 +25,7 @@ interface CommandEvent {
 }
 
 interface Dispatch {
+  client: object;
   t: string;
   d: unknown;
   shardId: number;
@@ -158,11 +159,18 @@ export function byakuPlugin(options: ByakuOptions = {}): ByakuPlugin {
       });
 
       api.gateway.onDispatch((packet, next, meta) => {
-        if (bridge.listensToDispatches) bridge.emitDispatch({ t: packet.t, d: packet.d, shardId: meta.shardId });
+        if (bridge.listensToDispatches)
+          bridge.emitDispatch({ client: meta.client, t: packet.t, d: packet.d, shardId: meta.shardId });
         return next();
       });
     },
-    setup: (client) => byakuFor(client).install(),
+    setup: async (client, api) => {
+      const byaku = byakuFor(client);
+      const { ByakuButtons, ByakuSelects, ByakuModal } = byaku.handlerClasses;
+      api?.components.add(ByakuButtons, ByakuSelects);
+      api?.modals.add(ByakuModal);
+      await byaku.install();
+    },
     teardown: async (client) => instances.get(client)?.uninstall(),
   });
 }
