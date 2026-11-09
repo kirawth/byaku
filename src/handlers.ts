@@ -334,7 +334,7 @@ async function handleCommand(byaku: Byaku, ctx: CommandContext<ReturnType<typeof
 
   if (message) {
     const raw = { id: message.id, channel_id: ctx.channelId, content: message.content };
-    const text = (await byaku.triggerText(raw, message)) ?? message.content.replace(/^\S+\s*/, '');
+    const text = (await byaku.triggerText(raw, message, true)) ?? message.content.replace(/^\S+\s*/, '');
     return byaku.run({
       ownerId: userId,
       channelId: ctx.channelId,

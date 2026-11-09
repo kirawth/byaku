@@ -6,6 +6,7 @@ import {
   type Client,
   type CommandContext,
   type GatewayDispatchPayload,
+  type GatewayMessageCreateDispatchData,
   type MessageData,
   type MessageFlags,
   type MessageStructure,
@@ -118,7 +119,6 @@ const WORKER_TIMEOUT_MS = 10_000;
 
 const SYNTHETIC = Symbol.for('byaku.synthetic');
 const synthetic = new WeakSet<object>();
-const GUARDED = Symbol.for('byaku.prefixGuard');
 const installedInstances = new WeakMap<object, Set<Byaku>>();
 
 /** @internal Copies raw message data with changed content, author or channel, marked so Byaku's own trigger ignores it. */
@@ -136,34 +136,6 @@ export function syntheticMessage<T extends object>(
 
 function isSynthetic(value: unknown): boolean {
   return typeof value === 'object' && value !== null && (synthetic.has(value) || SYNTHETIC in value);
-}
-
-/**
- * @internal Wraps the bot's prefix function so Seyfert skips Byaku's triggers. For every other message it
- * returns exactly what the original returns, synchronously if the original is synchronous.
- */
-export function guardPrefix(
-  original: PrefixFn,
-  isForByaku: (message: MessageStructure, prefixes: string[]) => boolean,
-): PrefixFn {
-  const inner = unguardPrefix(original);
-  const decide = (message: MessageStructure, prefixes: string[]) => {
-    try {
-      return isForByaku(message, prefixes) ? [] : prefixes;
-    } catch {
-      return prefixes;
-    }
-  };
-  const guarded = (message: MessageStructure) => {
-    const result = inner(message);
-    return result instanceof Promise ? result.then((p) => decide(message, p)) : decide(message, result);
-  };
-  return Object.assign(guarded, { [GUARDED]: inner });
-}
-
-/** @internal */
-export function unguardPrefix(fn: PrefixFn): PrefixFn {
-  return (fn as PrefixFn & { [GUARDED]?: PrefixFn })[GUARDED] ?? fn;
 }
 
 /**
@@ -195,7 +167,6 @@ export class Byaku {
   private installed = false;
   private stopCollector: (() => void) | undefined;
   private collectorPending = false;
-  private originalPrefix: PrefixFn | undefined;
   private classes: ByakuHandlerClasses | undefined;
   private bridge: BridgeHandler | undefined;
   private appOwners = new Set<string>();
@@ -243,7 +214,8 @@ export class Byaku {
 
   /**
    * Connects Byaku to the client: a raw gateway listener (your `messageCreate` keeps working), the buttons
-   * and modals (next to yours), the prefix guard, the worker bridge and `/byaku` if `slash` is set.
+   * and modals (next to yours), the worker bridge and `/byaku` if `slash` is set.
+   * Use `shouldSkipMessageCommand()` in your command router to reserve Byaku triggers.
    * Without `byakuPlugin()`, call this after `client.start()` so file loading doesn't replace `/byaku`.
    */
   async install(): Promise<void> {
@@ -289,15 +261,6 @@ export class Byaku {
       client.commands.set([command]);
     }
 
-    const commands = client.options.commands;
-    if (this.options.prefixGuard && commands?.prefix) {
-      this.originalPrefix = unguardPrefix(commands.prefix);
-      commands.prefix = guardPrefix(commands.prefix, (message, prefixes) => {
-        const content = (message as { content?: string }).content ?? '';
-        return this.enabledFlag && this.match(content, prefixes) !== undefined;
-      });
-    }
-
     this.bridge = (request) => this.answerBridge(request);
     installBridge(this.bridge);
     this.sessions.start();
@@ -311,8 +274,6 @@ export class Byaku {
     this.stopCollector?.();
     this.stopCollector = undefined;
     installedInstances.get(this.client)?.delete(this);
-    const commands = (this.client as GatewayClient).options.commands;
-    if (commands && this.originalPrefix) commands.prefix = this.originalPrefix;
     if (this.bridge) uninstallBridge(this.bridge);
     for (const { editor } of this.lives.values()) editor.close();
     this.lives.clear();
@@ -360,6 +321,20 @@ export class Byaku {
     }
     // Legacy controls have no instance prefix. Keep their single-instance fallback.
     return !id.sid.includes('-') && instances.values().next().value === this;
+  }
+
+  /**
+   * Call before your command handler parses a gateway message. A true result reserves the message for
+   * Byaku's installed listener; it does not execute code or suppress gateway events and collectors.
+   * `advanced.prefixGuard: false`, disabled and uninstalled instances always return false.
+   */
+  async shouldSkipMessageCommand(raw: RawMessage): Promise<boolean> {
+    return (
+      this.installed &&
+      this.enabledFlag &&
+      this.options.prefixGuard &&
+      (await this.triggerText(raw, undefined, true)) !== undefined
+    );
   }
 
   /** For bots that route messages themselves. Resolves to true when the message was a Byaku trigger. */
@@ -420,24 +395,33 @@ export class Byaku {
   }
 
   /** @internal The text after a Byaku trigger, or `undefined`. */
-  async triggerText(raw: RawMessage, message?: MessageStructure): Promise<string | undefined> {
+  async triggerText(raw: RawMessage, message?: MessageStructure, fromCommand = false): Promise<string | undefined> {
     const content = raw.content ?? '';
     if (!content) return undefined;
-    // Fixed prefixes and mentions first: the bot's prefix function may be a database lookup
     const quick = this.match(content, []);
-    if (quick !== undefined) return quick;
-    const prefix = this.originalPrefix ?? (this.client as GatewayClient).options.commands?.prefix;
-    // Without the guard, Seyfert itself routes `<prefix>byaku` to a loaded ByakuCommand; answering too would reply twice
-    const commandAnswers = !this.options.prefixGuard && this.client.commands.values.some(isByakuHandler);
-    if (!prefix || commandAnswers) return undefined;
+    const commandAnswers =
+      !fromCommand && !this.options.prefixGuard && this.client.commands.values.some(isByakuHandler);
+    // Fixed prefixes and mentions need no prefix lookup unless a loaded ByakuCommand might own this message.
+    if (quick !== undefined && !commandAnswers) return quick;
+    const prefix = (this.client as GatewayClient).options.commands?.prefix;
+    if (!prefix) return quick;
     try {
-      // Keep the public partial raw-message contract; the gateway provides Seyfert's full payload.
-      return this.match(
-        content,
-        await unguardPrefix(prefix)(message ?? Transformers.Message(this.client, raw as MessageData)),
-      );
+      const prefixes = await prefix(message ?? Transformers.Message(this.client, raw as MessageData));
+      if (commandAnswers) {
+        const matched = [...prefixes].sort((a, b) => b.length - a.length).find((p) => content.startsWith(p));
+        if (matched !== undefined) {
+          const resolved = this.client.handleCommand.resolveCommandFromContent(
+            content.slice(matched.length).trimStart(),
+            matched,
+            // RawMessage keeps the public partial-input contract; gateway dispatches supply the complete payload.
+            raw as GatewayMessageCreateDispatchData,
+          );
+          if (resolved.command && isByakuHandler(resolved.command)) return undefined;
+        }
+      }
+      return quick ?? this.match(content, prefixes);
     } catch {
-      return undefined;
+      return quick;
     }
   }
 
@@ -472,7 +456,7 @@ export class Byaku {
     const session = await this.sessions.findByTrigger(raw.id);
     if (!session || session.live || Date.now() - session.createdAt > this.options.editRerunMs) return false;
     if (raw.author && raw.author.id !== session.ownerId) return false;
-    const text = await this.triggerText({ channel_id: session.channelId, ...raw });
+    const text = await this.triggerText({ channel_id: session.channelId, ...raw }, undefined, true);
     if (text === undefined || text === session.data.raw || !(await this.isOwner(session.ownerId))) return false;
     await this.rerun(session, session.ownerId, text, 'edit-run');
     return true;

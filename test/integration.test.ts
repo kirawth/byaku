@@ -158,11 +158,11 @@ describe('the bot keeps working', () => {
     expect(messagePosts(bot)).toHaveLength(1);
   });
 
-  it('uninstall() stops listening and restores the prefix function', async () => {
+  it('uninstall() stops listening and leaves the prefix function unchanged', async () => {
     const prefix = vi.fn(() => ['?']);
     const { bot, byaku } = await setup({}, { prefix });
     const before = (bot.client.options.commands as { prefix: unknown }).prefix;
-    expect(before).not.toBe(prefix);
+    expect(before).toBe(prefix);
     await byaku.uninstall();
     expect((bot.client.options.commands as { prefix: unknown }).prefix).toBe(prefix);
     await bot.send('?by 1');

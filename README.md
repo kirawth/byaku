@@ -55,6 +55,10 @@ The plugin setup shown below installs Byaku automatically during startup.
 
 The application owner (or every member of the owning team) is allowed automatically; `owners` adds more accounts.
 
+To reserve triggers against your bot's own `by`/`byaku` commands or a loaded `ByakuCommand`, also add the
+[explicit command-router hook](#prefix-routing). `install()` leaves your prefix function and command handler
+untouched; it no longer installs that routing guard automatically.
+
 **3. Type in Discord** (with your bot's prefix, here `?`)
 
 | You type                          | You get                                                       |
@@ -182,7 +186,7 @@ new Byaku(client, {
   advanced: {
     enabled: process.env.BYAKU !== 'off', // default true
     includeAppOwners: true, // allow the application owner / team members
-    prefixGuard: true, // make Seyfert ignore Byaku's triggers (see FAQ)
+    prefixGuard: true, // reserve triggers through your command-router hook (see FAQ)
     timeouts: { session: '15m', shell: '5m', editRerun: '5m' },
     limits: { pageSize: 1850, catBytes: 1_048_576, curlBytes: 2_097_152 },
     shell: { command: 'pwsh', cwd: '/srv/bot', env: { NODE_ENV: 'production' } },
@@ -280,6 +284,80 @@ message was for Byaku.
 
 </details>
 
+<a id="prefix-routing"></a>
+
+### Explicit prefix routing (Seyfert 5.2.0)
+
+**Migration:** installing Byaku previously replaced `client.options.commands.prefix` to reserve its triggers.
+It now leaves that function and `client.handleCommand` unchanged. Bots with a colliding command or a loaded
+`ByakuCommand` must add this hook to retain the previous single-execution behavior. Bots without such commands
+can continue using `install()` alone.
+
+Before:
+
+```ts
+const byaku = new Byaku(client, { owners: ['YOUR_USER_ID'] });
+await byaku.install(); // also reserved triggers automatically
+```
+
+After, for the default Seyfert command handler:
+
+```ts
+import { Client } from 'seyfert';
+import { HandleCommand } from 'seyfert/lib/commands/handle.js';
+import { Byaku } from 'byaku';
+
+const client = new Client({ commands: { prefix: () => ['?'] } });
+const byaku = new Byaku(client, { owners: ['YOUR_USER_ID'] });
+
+class BotCommands extends HandleCommand {
+  override async message(raw: Parameters<HandleCommand['message']>[0], shardId: number) {
+    if (await byaku.shouldSkipMessageCommand(raw)) return;
+    return super.message(raw, shardId);
+  }
+}
+
+client.setServices({ handleCommand: BotCommands }); // explicit bot configuration, before startup
+await client.start();
+await byaku.install();
+```
+
+For `byakuPlugin()`, use `client.byaku.shouldSkipMessageCommand(raw)` in that same method, configure the
+service before `client.start()`, and let the plugin install Byaku. Do not add a second Byaku instance.
+
+**If you already have a custom handler, add the conditional inside its existing `message()` method, before
+its parser or `super.message()` call.** Keep its existing bookkeeping before/after that conditional. Do not
+replace the service with the default example. For example, a handler that counts incoming and finished packets
+retains both operations:
+
+```ts
+override async message(raw: Parameters<HandleCommand['message']>[0], shardId: number) {
+  this.received++;
+  try {
+    if (await byaku.shouldSkipMessageCommand(raw)) return;
+    return await super.message(raw, shardId);
+  } finally {
+    this.completed++;
+  }
+}
+```
+
+The hook only returns a routing decision; Byaku's installed gateway listener runs the original code, including
+quotes and flags. It returns `false` for disabled/uninstalled instances and when `advanced.prefixGuard` is
+`false`. Normal commands continue through your handler. No raw or message events, cache updates or collectors
+are cancelled, and long evaluations do not block gateway dispatch. With yunaforseyfert, configure the handler
+before startup so Yuna can attach its parser/resolver to that same instance.
+
+Seyfert 5.2.0 has no public command-only interception hook. A gateway veto also drops events and collectors;
+command observers cannot cancel execution. Context scopes can stop execution only after argument parsing,
+which may already fetch users/channels/roles or fail in a custom parser. This is why an explicit integration
+before parsing is required. A custom handler that cannot accept this conditional needs a framework extension;
+Byaku cannot provide automatic collision isolation for it without changing its service or prefix function.
+
+When the guard is explicitly disabled and a `ByakuCommand` is loaded, the collector yields only messages that
+the current prefix and command resolver route to that handler, avoiding a second execution. That path still
+uses the bot's argument parser; keep the guard enabled and integrate the hook to bypass it for raw code.
+
 <a id="custom-modes"></a>
 
 ## 🧩 Custom modes
@@ -347,8 +425,10 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 <br>
 
-The prefix guard (on by default) wraps your prefix function so Seyfert skips messages meant for Byaku and returns
-your prefixes untouched for everything else. Your other commands, and yunaforseyfert's resolver, keep working.
+`advanced.prefixGuard` still defaults to `true`, but now controls the explicit
+[`shouldSkipMessageCommand()` hook](#prefix-routing). Call it before your command handler parses the message.
+It reserves Byaku triggers while leaving your prefix function, other commands and gateway events intact.
+Setting it to `false` lets a bot's own command run alongside Byaku, as before.
 
 </details>
 
