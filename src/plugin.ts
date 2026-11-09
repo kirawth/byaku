@@ -1,4 +1,4 @@
-import { type Command, createPlugin, type SeyfertPlugin, type UsingClient } from 'seyfert';
+import { type Command, createPlugin, type GatewayDispatchPayload, type SeyfertPlugin, type UsingClient } from 'seyfert';
 
 import { Byaku } from './byaku.js';
 import { createSlashCommand, type ByakuHandlerClasses } from './handlers.js';
@@ -24,11 +24,7 @@ interface CommandEvent {
   scope?: string;
 }
 
-interface Dispatch {
-  t: string;
-  d: unknown;
-  shardId: number;
-}
+type Dispatch = GatewayDispatchPayload & { client: object; shardId: number };
 
 /** @internal What the plugin collects from Seyfert's hooks, for modes such as `debug`, `rest` and `events`. */
 export class ByakuPluginBridge {
@@ -158,7 +154,7 @@ export function byakuPlugin(options: ByakuOptions = {}): ByakuPlugin {
       });
 
       api.gateway.onDispatch((packet, next, meta) => {
-        if (bridge.listensToDispatches) bridge.emitDispatch({ t: packet.t, d: packet.d, shardId: meta.shardId });
+        if (bridge.listensToDispatches) bridge.emitDispatch({ ...packet, client: meta.client, shardId: meta.shardId });
         return next();
       });
     },
@@ -167,6 +163,9 @@ export function byakuPlugin(options: ByakuOptions = {}): ByakuPlugin {
       if (byaku.options.slash) {
         api?.commands.add(createSlashCommand(byaku), { guilds: byaku.options.slash.guilds ?? [] });
       }
+      const { ByakuButtons, ByakuSelects, ByakuModal } = byaku.handlerClasses;
+      api?.components.add(ByakuButtons, ByakuSelects);
+      api?.modals.add(ByakuModal);
       await byaku.install();
     },
     teardown: async (client) => instances.get(client)?.uninstall(),

@@ -219,6 +219,16 @@ declare module 'seyfert' {
 const client = new Client({ plugins });
 ```
 
+The plugin contributes buttons and modals through Seyfert's lifecycle: `client.close()` removes them, and
+`client.start()` restores them. Calling `client.byaku.uninstall()` stops its work and deactivates its handlers;
+`install()` reactivates them without adding duplicates.
+
+Manual installation uses Seyfert 5.2.0's public collector `stop` callback. If no packet has reached the collector
+before `uninstall()`, it removes itself on the next packet without handling it. Manually registered component
+and slash handlers stay attached but inactive, because 5.2.0 has no public removal API for them. Reuse the same
+Byaku instance when reinstalling; use the plugin when framework-owned removal is needed. Each instance handles
+its own session controls. Keep a single `/byaku` command source per client.
+
 **With Seyfert's file loaders**, export one class per file. All files must share the same `byaku` instance
 from a module outside your loader directories:
 

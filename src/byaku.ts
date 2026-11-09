@@ -14,7 +14,13 @@ import {
   type UsingClient,
 } from 'seyfert';
 
-import { createHandlerClasses, createSlashCommand, type ByakuHandlerClasses, isByakuHandler } from './handlers.js';
+import {
+  createHandlerClasses,
+  createSlashCommand,
+  type ByakuHandlerClasses,
+  handlerOwner,
+  isByakuHandler,
+} from './handlers.js';
 import {
   errorMessage,
   formatError,
@@ -45,8 +51,8 @@ import {
 } from './parse.js';
 import type { ByakuPluginBridge } from './plugin.js';
 import { JsRunner } from './runners.js';
-import { LiveEditor, type Session, SessionManager } from './session.js';
-import { type ByakuBody, renderSession } from './view.js';
+import { LiveEditor, newSessionId, type Session, SessionManager } from './session.js';
+import { type ByakuBody, parseCustomId, renderSession } from './view.js';
 import {
   askAllWorkers,
   askWorker,
@@ -113,6 +119,7 @@ const WORKER_TIMEOUT_MS = 10_000;
 const SYNTHETIC = Symbol.for('byaku.synthetic');
 const synthetic = new WeakSet<object>();
 const GUARDED = Symbol.for('byaku.prefixGuard');
+const installedInstances = new WeakMap<object, Set<Byaku>>();
 
 /** @internal Copies raw message data with changed content, author or channel, marked so Byaku's own trigger ignores it. */
 export function syntheticMessage<T extends object>(
@@ -183,9 +190,11 @@ export class Byaku {
   /** @internal Running live views by session id. */
   readonly lives = new Map<string, { editor: LiveEditor<ByakuBody>; options: LiveOptions }>();
 
+  private readonly sessionPrefix = `${newSessionId()}-`;
   private enabledFlag: boolean;
   private installed = false;
   private stopCollector: (() => void) | undefined;
+  private collectorPending = false;
   private originalPrefix: PrefixFn | undefined;
   private classes: ByakuHandlerClasses | undefined;
   private bridge: BridgeHandler | undefined;
@@ -200,12 +209,18 @@ export class Byaku {
     this.enabledFlag = this.options.enabled;
     this.redactor = new Redactor([...this.options.secrets, ...secretsFromEnv()]);
     this.sessions = new SessionManager({
+      idPrefix: this.sessionPrefix,
       ttlMs: this.options.sessionTtlMs,
       ...(this.options.store ? { store: this.options.store } : {}),
       onExpire: (session) => this.onExpire(session),
     });
     this.js = new JsRunner({ ttlMs: this.options.sessionTtlMs });
     this.registry.register(...builtinModes, ...this.options.modes);
+  }
+
+  /** @internal Whether lifecycle-managed handlers may run. */
+  get isInstalled(): boolean {
+    return this.installed;
   }
 
   get enabled(): boolean {
@@ -236,41 +251,37 @@ export class Byaku {
     this.installed = true;
     const client = this.client as GatewayClient;
 
-    // Seyfert doesn't await `raw` collectors, so a long run never holds up the bot's own handling
-    const run = (packet: GatewayDispatchPayload) => {
-      let task: Promise<boolean>;
-      switch (packet.t) {
-        case 'MESSAGE_CREATE':
-          task = this.handleRaw(packet.d);
-          break;
-        case 'MESSAGE_UPDATE':
-          task = this.handleRawUpdate(packet.d);
-          break;
-        case 'MESSAGE_DELETE':
-          task = this.handleRawDelete(packet.d);
-          break;
-        default:
-          return;
-      }
-      void task.catch((err: unknown) => client.logger.error('[byaku]', err));
-    };
-    client.collectors.create({
-      event: 'raw',
-      filter: (packet: { t?: string }) =>
-        packet.t === 'MESSAGE_CREATE' || packet.t === 'MESSAGE_UPDATE' || packet.t === 'MESSAGE_DELETE',
-      run,
-    });
-    // Collectors have no public remove; Seyfert keeps a copy of the options, so find ours by its `run`
-    this.stopCollector = () => {
-      const list = client.collectors.values.get('raw') as { options: { run: unknown } }[] | undefined;
-      const index = list?.findIndex((c) => c.options.run === run) ?? -1;
-      if (index >= 0) list?.splice(index, 1);
-    };
+    const instances = installedInstances.get(client) ?? new Set<Byaku>();
+    instances.add(this);
+    installedInstances.set(client, instances);
 
-    // Seyfert runs every matching component command, so never add Byaku's twice
-    if (!client.components.commands.some(isByakuHandler)) {
+    if (this.plugin) {
+      this.stopCollector = this.plugin.onDispatch((packet) => {
+        if (packet.client === this.client) this.handleDispatch(packet);
+      });
+    } else {
+      // 5.2.0 only exposes a collector's stop callback when it runs. Reuse a pending collector on reinstall.
+      if (!this.collectorPending) {
+        this.collectorPending = true;
+        client.collectors.create({
+          event: 'raw',
+          filter: () => true,
+          run: (packet, stop) => {
+            this.stopCollector = () => {
+              stop();
+              this.collectorPending = false;
+              this.stopCollector = undefined;
+            };
+            if (!this.installed) this.stopCollector();
+            else this.handleDispatch(packet);
+          },
+        });
+      }
       const { ByakuButtons, ByakuSelects, ByakuModal } = this.handlerClasses;
-      client.components.set([new ByakuButtons(), new ByakuSelects(), new ByakuModal()]);
+      const missing = [ByakuButtons, ByakuSelects, ByakuModal].filter(
+        (Handler) => !client.components.commands.some((handler) => handler instanceof Handler),
+      );
+      client.components.set(missing);
     }
     if (!this.plugin && this.options.slash && !client.commands.values.some(isByakuHandler)) {
       const command = new (createSlashCommand(this))();
@@ -293,19 +304,62 @@ export class Byaku {
     void this.refreshAppOwners();
   }
 
-  /** Stops listening, kills running work and removes the buttons and the prefix guard. */
+  /** Stops listening, kills running work and deactivates handlers. Plugin contributions are removed on client close. */
   async uninstall(): Promise<void> {
     if (!this.installed) return;
     this.installed = false;
     this.stopCollector?.();
-    const handlers = this.client.components.commands;
-    for (let i = handlers.length - 1; i >= 0; i--) if (isByakuHandler(handlers[i])) handlers.splice(i, 1);
+    this.stopCollector = undefined;
+    installedInstances.get(this.client)?.delete(this);
     const commands = (this.client as GatewayClient).options.commands;
     if (commands && this.originalPrefix) commands.prefix = this.originalPrefix;
     if (this.bridge) uninstallBridge(this.bridge);
     for (const { editor } of this.lives.values()) editor.close();
     this.lives.clear();
     await this.sessions.stop();
+  }
+
+  /** @internal Routes a packet without awaiting long-running work in the gateway. */
+  // Seyfert doesn't await raw dispatch listeners, so a long run never holds up the bot's own handling
+  private handleDispatch(packet: GatewayDispatchPayload): void {
+    if (!this.installed) return;
+    let task: Promise<boolean>;
+    switch (packet.t) {
+      case 'MESSAGE_CREATE':
+        task = this.handleRaw(packet.d);
+        break;
+      case 'MESSAGE_UPDATE':
+        task = this.handleRawUpdate(packet.d);
+        break;
+      case 'MESSAGE_DELETE':
+        task = this.handleRawDelete(packet.d);
+        break;
+      default:
+        return;
+    }
+    void task.catch((err: unknown) => this.client.logger.error('[byaku]', err));
+  }
+
+  /** @internal Keep shared custom ids from being answered by another installed instance. */
+  async acceptsInteraction(customId: string): Promise<boolean> {
+    if (!this.installed) return false;
+    const id = parseCustomId(customId);
+    if (!id) return false;
+    const instances = installedInstances.get(this.client);
+    if (!instances) return false;
+    if (id.sid === 'new') {
+      const owner = this.client.commands.values.map(handlerOwner).find((owner) => owner !== undefined);
+      if (owner) return owner === this;
+    } else {
+      for (const instance of instances) {
+        if (id.sid.startsWith(instance.sessionPrefix)) return instance === this;
+      }
+      for (const instance of instances) {
+        if (await instance.sessions.get(id.sid)) return instance === this;
+      }
+    }
+    // Legacy controls have no instance prefix. Keep their single-instance fallback.
+    return !id.sid.includes('-') && instances.values().next().value === this;
   }
 
   /** For bots that route messages themselves. Resolves to true when the message was a Byaku trigger. */
