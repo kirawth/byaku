@@ -186,8 +186,8 @@ export class FakeBot {
         const msg = { ...source, ...pick(data) };
         this.messages.set(msg.id, msg);
         this.interactionMessage.set(token, msg);
-      } else if (type === 4) {
-        // CHANNEL_MESSAGE_WITH_SOURCE
+      } else if (type === 4 || type === 5) {
+        // CHANNEL_MESSAGE_WITH_SOURCE or its deferred placeholder
         const msg = this.toMessage(CHANNEL_ID, data, nextId(), { ephemeral: ((data?.flags ?? 0) & 64) === 64 });
         this.messages.set(msg.id, msg);
         this.tokenMessage.set(token, msg.id);

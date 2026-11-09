@@ -722,14 +722,11 @@ export class Byaku {
         const sent = await delivery.ctx.editOrReply(body as never, true);
         session.replyId = (sent as { id?: string } | undefined)?.id;
       } else if (delivery.kind === 'modal') {
-        await delivery.ctx.write(body as never);
+        const { flags: _flags, ...edit } = body;
+        const sent = await delivery.ctx.editResponse(edit as never);
         Object.assign(session, { interactionToken: delivery.ctx.interaction.token });
         session.data.tokenAt = Date.now();
-        if (!session.ephemeral) {
-          session.replyId = (
-            await this.client.interactions.fetchOriginal(delivery.ctx.interaction.token).catch(() => undefined)
-          )?.id;
-        }
+        if (!session.ephemeral) session.replyId = sent.id;
       } else {
         await this.editMessage(session, body);
       }
