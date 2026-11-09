@@ -228,9 +228,10 @@ describe('/byaku slash command', () => {
 
     const submit = await bot.submitModal(modal.data.custom_id, { code: '7 * 6' });
     const answer = await bot.waitFor(() => bot.callbacks(submit)[0]);
-    expect(answer.type).toBe(4);
+    expect(answer.type).toBe(5);
     expect(answer.data.flags).toBe(64);
-    expect(answer.data.content).toContain('42');
+    const result = bot.calls.find((c) => c.method === 'PATCH' && c.url.includes(`/${submit}/messages/@original`));
+    expect(result?.body.content).toContain('42');
 
     const denied = await bot.slash('byaku', [], '300000000000000003');
     expect(bot.callbacks(denied)[0]).toMatchObject({ type: 4, data: { flags: 64 } });

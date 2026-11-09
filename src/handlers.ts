@@ -280,9 +280,18 @@ async function runCodeModal(byaku: Byaku, ctx: ModalContext, kind: string): Prom
   if (!code && file) {
     if (!/\.(m?js|cjs|ts|mts|cts|txt|sh)$/i.test(file.filename)) return deny(ctx, 'Upload a .js or .ts file.');
     if (file.size > 1_048_576) return deny(ctx, 'The file is larger than 1 MB.');
-    code = await fetch(file.url, { signal: AbortSignal.timeout(15_000) }).then((r) => r.text());
   }
-  if (!code) return deny(ctx, 'Type some code or upload a file.');
+  if (!code && !file) return deny(ctx, 'Type some code or upload a file.');
+  await ctx.deferReply(visibility === 'e');
+  if (!code && file) {
+    try {
+      code = await fetch(file.url, { signal: AbortSignal.timeout(15_000) }).then((r) => r.text());
+    } catch {
+      return ctx.editResponse({ content: 'Could not read the uploaded file.', allowed_mentions: { parse: [] } });
+    }
+    if (!code)
+      return ctx.editResponse({ content: 'Type some code or upload a file.', allowed_mentions: { parse: [] } });
+  }
   return byaku.run({
     ownerId: ctx.author.id,
     ...whereOf(ctx),
