@@ -103,13 +103,14 @@ pass in `scope`.
 
 #### 🌐 Bot and workers
 
-| Mode     | What it does                                               | Example                                      |
-| -------- | ---------------------------------------------------------- | -------------------------------------------- |
-| _(none)_ | Versions, uptime, memory, shards, cache, event-loop lag    | `?by`                                        |
-| `shards` | Workers or shards with ping and memory                     | `?by shards`                                 |
-| `shard`  | JavaScript on one worker                                   | `?by shard 1 js client.cache.guilds.count()` |
-| `all`    | JavaScript on every worker, merged (10 s limit per worker) | `?by all js process.memoryUsage().rss`       |
-| `help`   | Every mode, or one in detail                               | `?by help sh`                                |
+| Mode     | What it does                                                   | Example                                      |
+| -------- | -------------------------------------------------------------- | -------------------------------------------- |
+| _(none)_ | Versions, uptime, memory, shards, cache, event-loop lag        | `?by`                                        |
+| `shards` | Workers or shards with ping and memory                         | `?by shards`                                 |
+| `shard`  | JavaScript on one worker                                       | `?by shard 1 js client.cache.guilds.count()` |
+| `all`    | JavaScript on every worker, merged (10 s limit per worker)     | `?by all js process.memoryUsage().rss`       |
+| `reload` | Load all bot code again without going offline ([how](#reload)) | `?by reload`                                 |
+| `help`   | Every mode, or one in detail                                   | `?by help sh`                                |
 
 #### 🚩 Flags
 
@@ -469,6 +470,38 @@ are fine with TypeScript 5.4 and later.
 Yes. Each worker runs its own Byaku, and a button press arrives on the same worker as the message that created it.
 `shards`, `shard <id> js …` and `all js …` reach the other workers. Pass `advanced.store` to keep sessions outside
 memory. Replies from `/byaku` are private and can be edited for 15 minutes, the lifetime of a Discord interaction.
+
+</details>
+
+<details>
+<summary><b>Can I reload the bot without restarting it?</b></summary>
+
+<br>
+
+<a id="reload"></a>
+
+Yes, when the bot runs on Seyfert's `WorkerManager` and Seyfert has `WorkerManager.hotReload` (merged after 5.2.1;
+until the next release, install `seyfert@dev`). `?by reload` replaces the workers one at a time: each new worker
+starts in a fresh process, so it loads **every file again** (commands, events, services, helpers), connects its
+shards and fills its cache while the old worker keeps answering. Then they switch, and the old worker finishes its
+running work and exits. The bot never goes offline.
+
+| You type                  | What happens                                                          |
+| ------------------------- | --------------------------------------------------------------------- |
+| `?by reload`              | Every worker, the one you typed in last                               |
+| `?by reload 0 2`          | Only workers 0 and 2                                                  |
+| `?by reload --continue`   | Keep going after a worker fails (it stops at the first one otherwise) |
+| `?by reload --timeout=2m` | Give each new worker more time to get ready (Seyfert's default: 60 s) |
+| `?by reload --drain=30s`  | Let the old worker finish its work for longer (default 10 s)          |
+| `?by reload files`        | Only load Seyfert's command, component, event and lang files again    |
+
+If a new worker fails to start (a syntax error, a crash, not ready in time), it is stopped and the old one keeps
+running, so a broken update can't take the bot down. A few events right at the switch may arrive twice or not at
+all. Seyfert's `resumeSession` option avoids that for one-shard workers with a shared cache: call
+`manager.hotReload({ resumeSession: true })` from your manager file for it.
+
+Not reloaded: the manager file itself, and anything kept in a worker's memory (cooldowns, collectors, eval
+variables). Without the `WorkerManager`, `?by reload` falls back to `files` and says so.
 
 </details>
 

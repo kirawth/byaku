@@ -5,6 +5,7 @@ import { ByakuError } from '../options.js';
 import type { Flags } from '../parse.js';
 import type { LiveKind, Session } from '../session.js';
 import { jsModes } from './eval.js';
+import { reloadModes } from './reload.js';
 import { shellModes } from './shell.js';
 import { systemModes } from './system.js';
 import { toolModes } from './tools.js';
@@ -143,4 +144,6 @@ export class ModeRegistry {
   }
 }
 
-export const builtinModes: ByakuMode[] = [...systemModes, ...jsModes, ...shellModes, ...toolModes].map(defineMode);
+export const builtinModes: ByakuMode[] = [...systemModes, ...jsModes, ...shellModes, ...reloadModes, ...toolModes].map(
+  defineMode,
+);

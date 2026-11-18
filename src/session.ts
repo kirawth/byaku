@@ -5,7 +5,7 @@ import type { Flags } from './parse.js';
 
 type Awaitable<T> = T | Promise<T>;
 
-export type LiveKind = 'shell' | 'watch' | 'top' | 'events' | 'rest' | 'tail' | 'bench';
+export type LiveKind = 'shell' | 'watch' | 'top' | 'events' | 'rest' | 'tail' | 'bench' | 'reload';
 
 /**
  * One console run: input, output, view state and the messages it belongs to. Plain JSON data, so a

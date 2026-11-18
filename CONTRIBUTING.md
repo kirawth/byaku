@@ -78,7 +78,7 @@ up `all js`.
 
 ## Adding a mode
 
-1. Add a definition to the right file in `src/modes/` (`eval.ts`, `system.ts`, `shell.ts`, `tools.ts`):
+1. Add a definition to the right file in `src/modes/` (`eval.ts`, `system.ts`, `shell.ts`, `reload.ts`, `tools.ts`):
 
    ```ts
    {

@@ -163,15 +163,17 @@ export function renderSession(session: Session, extras: ViewExtras, display = (t
             button(sid, 'k', '⏹️', { label: 'Kill', style: ButtonStyle.Danger }),
             button(sid, 'in', '📝', { label: 'Send input' }),
           ]
-        : session.live.kind === 'bench'
-          ? [button(sid, 'k', '⏹️', { label: 'Stop', style: ButtonStyle.Danger })]
-          : [
-              session.live.paused
-                ? button(sid, 'rs', '▶️', { label: 'Resume', style: ButtonStyle.Primary })
-                : button(sid, 'ps', '⏸️', { label: 'Pause' }),
-              button(sid, 'st', '⏹️', { label: 'Stop', style: ButtonStyle.Danger }),
-            ];
-    return plainBody(content, [new ActionRow<Button>().setComponents(controls)], ephemeral);
+        : session.live.kind === 'reload'
+          ? []
+          : session.live.kind === 'bench'
+            ? [button(sid, 'k', '⏹️', { label: 'Stop', style: ButtonStyle.Danger })]
+            : [
+                session.live.paused
+                  ? button(sid, 'rs', '▶️', { label: 'Resume', style: ButtonStyle.Primary })
+                  : button(sid, 'ps', '⏸️', { label: 'Pause' }),
+                button(sid, 'st', '⏹️', { label: 'Stop', style: ButtonStyle.Danger }),
+              ];
+    return plainBody(content, controls.length ? [new ActionRow<Button>().setComponents(controls)] : [], ephemeral);
   }
 
   const total = session.pages.length;
