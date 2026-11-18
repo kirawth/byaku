@@ -1,4 +1,4 @@
-import { WorkerClient } from 'seyfert';
+import { Client, WorkerClient } from 'seyfert';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -150,19 +150,127 @@ describe('reload', () => {
     expect(content).toContain('restart the bot once after updating Seyfert');
   });
 
-  it('"reload files" loads the Seyfert file handlers again on any client and reports each one', async () => {
-    seyfertSupportsHotReload(false);
-    const { bot, byaku } = await setup();
-    const commands = vi.spyOn(bot.client.commands, 'reloadAll').mockResolvedValue();
-    const events = vi.spyOn(bot.client.events!, 'reloadAll').mockRejectedValue(new Error('bad event file'));
+  describe('"reload files"', () => {
+    // Replaces one of the bot's handlers with a fake for a test
+    const fake = (bot: FakeBot, name: 'commands' | 'components' | 'events' | 'langs', handler: object) =>
+      Object.defineProperty(bot.client, name, { value: handler, configurable: true, writable: true });
 
-    const content = await reload(bot, byaku, 'reload files');
-    expect(commands).toHaveBeenCalledWith(false);
-    expect(content).toContain('Reloaded the files Seyfert loads');
-    expect(content).toContain('✅ commands');
-    expect(events).toHaveBeenCalled();
-    expect(content).toContain('❌ events: bad event file');
+    it("lists each failed file from Seyfert's reload report, relative to the bot's folder", async () => {
+      const { bot, byaku } = await setup();
+      fake(bot, 'components', {
+        reloadAll: vi.fn(),
+        reloadFiles: vi.fn(async () => ({
+          reloaded: [join(process.cwd(), 'src/components/ok.ts')],
+          failed: [
+            {
+              path: join(process.cwd(), 'src/components/broken.ts'),
+              error: new SyntaxError('Unexpected token\nat line 3'),
+            },
+          ],
+        })),
+      });
+      fake(bot, 'commands', {
+        reloadAll: vi.fn(),
+        reloadFiles: vi.fn(async () => ({ reloaded: ['a', 'b'], failed: [] })),
+      });
+
+      const content = await reload(bot, byaku, 'reload files');
+      expect(content).toContain('✅ commands · 2 files');
+      expect(content).toContain('❌ components · 1 reloaded, 1 failed');
+      expect(content).toContain(`${join('src', 'components', 'broken.ts')}: Unexpected token`);
+      expect(content).not.toContain('at line 3');
+      expect(content).toContain('❌');
+      expect(content).toContain('Your main file, services and the helpers these files import keep their old code.');
+    });
+
+    it('on an older Seyfert, reports files its reload dropped', async () => {
+      const { bot, byaku } = await setup();
+      const components = {
+        commands: [{ __filePath: '/bot/a.js' }, { __filePath: '/bot/a.js' }, { __filePath: '/bot/b.js' }],
+        reloadAll: vi.fn(async function (this: { commands: object[] }) {
+          this.commands = [{ __filePath: '/bot/b.js' }];
+        }),
+      };
+      fake(bot, 'components', components);
+
+      const content = await reload(bot, byaku, 'reload files');
+      expect(components.reloadAll).toHaveBeenCalledWith(false);
+      expect(content).toContain('❌ components · 1 reloaded, 1 dropped');
+      expect(content).toMatch(/a\.js: dropped/);
+    });
+
+    it('on an older Seyfert, skips a handler with a custom onFile unless --force', async () => {
+      class Handler {
+        commands = [{ __filePath: '/bot/a.js' }];
+        reloadAll = vi.fn(async () => undefined);
+        onFile(): unknown[] {
+          return [];
+        }
+      }
+      class Custom extends Handler {
+        override onFile(): unknown[] {
+          return [1];
+        }
+      }
+      const { bot, byaku } = await setup();
+      for (const handler of [Object.assign(new Handler(), { onFile: () => [] }), new Custom()]) {
+        fake(bot, 'components', handler);
+        const content = await reload(bot, byaku, 'reload files');
+        expect(content).toContain("⚠️ components skipped: this Seyfert's reload ignores your onFile");
+        expect(content).toContain(updateCommand());
+        expect(handler.reloadAll).not.toHaveBeenCalled();
+
+        expect(await reload(bot, byaku, 'reload --force files')).toContain('✅ components · 1 file');
+        expect(handler.reloadAll).toHaveBeenCalledWith(false);
+      }
+
+      // Seyfert's own onFile is not custom
+      const plain = new Handler();
+      fake(bot, 'components', plain);
+      expect(await reload(bot, byaku, 'reload files')).toContain('✅ components · 1 file');
+    });
+
+    it('reloads events and langs as a whole and reports their errors', async () => {
+      const { bot, byaku } = await setup();
+      fake(bot, 'events', { reloadAll: vi.fn(async () => undefined) });
+      fake(bot, 'langs', { reloadAll: vi.fn(async () => Promise.reject(new Error('bad lang file'))) });
+      const content = await reload(bot, byaku, 'reload files');
+      expect(content).toContain('✅ events');
+      expect(content).toContain('❌ langs: bad lang file');
+    });
   });
+
+  it.skipIf(!('reloadFiles' in Object.getPrototypeOf(new Client().components)))(
+    '"reload files" keeps every entry of a file that exports several components (real Seyfert)',
+    async () => {
+      const parent = join(process.cwd(), 'node_modules', '.cache');
+      mkdirSync(parent, { recursive: true });
+      const dir = mkdtempSync(join(parent, 'byaku-components-'));
+      try {
+        writeFileSync(join(dir, 'package.json'), JSON.stringify({ type: 'module' }));
+        writeFileSync(
+          join(dir, 'pair.js'),
+          `import { ComponentCommand } from ${JSON.stringify(import.meta.resolve('seyfert'))};
+export default [
+  class Yes extends ComponentCommand { componentType = 'Button'; customId = 'pair-yes'; run() {} },
+  class Pick extends ComponentCommand { componentType = 'StringSelect'; customId = 'pair-pick'; run() {} },
+];
+`,
+        );
+        const { bot, byaku } = await setup();
+        bot.client.components.onFile = (file) => [file.default ?? []].flat();
+        await bot.client.components.load(dir);
+        const fromFile = () => bot.client.components.commands.filter((c) => (c as { __filePath?: string }).__filePath);
+        expect(fromFile()).toHaveLength(2);
+
+        const content = await reload(bot, byaku, 'reload files');
+        expect(content).toContain('✅ components · 1 file');
+        expect(fromFile()).toHaveLength(2);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('picks the update command from the nearest lockfile', () => {
     const root = mkdtempSync(join(tmpdir(), 'byaku-lock-'));

@@ -1,8 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 
 import { WorkerClient } from 'seyfert';
 
+import { errorMessage } from '../inspect.js';
 import { formatMs } from '../output.js';
 import { parseDuration } from '../options.js';
 import { currentWorkerId, isWorkerClient, totalWorkers } from '../workers.js';
@@ -30,10 +31,6 @@ interface HotReloadClient {
     continueOnError?: boolean;
     onProgress?(event: Progress): void;
   }): Promise<Result>;
-}
-
-interface FileHandler {
-  reloadAll(stopIfFail?: boolean): Promise<void>;
 }
 
 const ICON: Record<Stage | 'waiting', string> = {
@@ -231,26 +228,131 @@ async function hotReload(ctx: ModeContext, client: HotReloadClient): Promise<Mod
   };
 }
 
-/** Without the WorkerManager only Seyfert's file handlers can be loaded again. */
+/** Seyfert's HandlerReloadResult (5.2.2-dev-44386046816.0 and newer), kept local like the types above. */
+interface HandlerReloadResult {
+  reloaded: string[];
+  failed: { path: string; error: unknown }[];
+}
+
+/** Seyfert's file handlers; `reloadFiles` exists from 5.2.2-dev-44386046816.0. */
+interface FileHandler {
+  reloadAll(stopIfFail?: boolean): Promise<void>;
+  reloadFiles?(stopIfFail?: boolean): Promise<HandlerReloadResult>;
+}
+
+interface FilesReport {
+  lines: string[];
+  files: number;
+  failed: number;
+  skipped: number;
+}
+
+/** Whether the bot replaced the handler's `onFile`, on the instance or in a subclass. */
+function hasCustomOnFile(handler: object): boolean {
+  if (Object.hasOwn(handler, 'onFile')) return true;
+  let nearest: unknown;
+  let base: unknown;
+  for (let proto = Object.getPrototypeOf(handler) as object | null; proto && proto !== Object.prototype;) {
+    if (Object.hasOwn(proto, 'onFile')) {
+      const onFile = (proto as { onFile: unknown }).onFile;
+      nearest ??= onFile;
+      base = onFile;
+    }
+    proto = Object.getPrototypeOf(proto) as object | null;
+  }
+  return nearest !== base;
+}
+
+/** The files a handler's entries came from, by Seyfert's `__filePath`. */
+function loadedFiles(entries: readonly unknown[]): Set<string> {
+  const files = new Set<string>();
+  for (const entry of entries) {
+    const path = (entry as { __filePath?: unknown } | undefined)?.__filePath;
+    if (typeof path === 'string') files.add(path);
+  }
+  return files;
+}
+
+function shortError(ctx: ModeContext, err: unknown): string {
+  const first = errorMessage(err).split('\n')[0] ?? '';
+  return ctx.redact(first.length > 160 ? `${first.slice(0, 159)}…` : first);
+}
+
+const shownPath = (path: string) => relative(process.cwd(), path) || path;
+
+/** Reloads one handler and adds its lines and counts to the report. */
+async function reloadHandler(
+  ctx: ModeContext,
+  name: 'commands' | 'components' | 'events' | 'langs',
+  handler: FileHandler,
+  report: FilesReport,
+): Promise<boolean> {
+  // This Seyfert reports every file
+  if (typeof handler.reloadFiles === 'function') {
+    const result = await handler.reloadFiles(false);
+    report.files += result.reloaded.length;
+    report.failed += result.failed.length;
+    if (!result.failed.length) {
+      report.lines.push(`✅ ${name} · ${result.reloaded.length} file${result.reloaded.length === 1 ? '' : 's'}`);
+      return true;
+    }
+    report.lines.push(`❌ ${name} · ${result.reloaded.length} reloaded, ${result.failed.length} failed`);
+    for (const { path, error } of result.failed) report.lines.push(`    ${shownPath(path)}: ${shortError(ctx, error)}`);
+    return false;
+  }
+
+  if (name === 'events' || name === 'langs') {
+    await handler.reloadAll(false);
+    report.lines.push(`✅ ${name}`);
+    return true;
+  }
+
+  // Older Seyferts reload without the handler's onFile: a file exporting several entries loses all but one
+  if (hasCustomOnFile(handler) && !ctx.flags.force) {
+    report.skipped++;
+    report.lines.push(
+      `⚠️ ${name} skipped: this Seyfert's reload ignores your onFile and would drop files.`,
+      `    Update Seyfert (${updateCommand()}) or use \`reload\`. \`reload files --force\` runs it anyway.`,
+    );
+    return true;
+  }
+  const entries = () =>
+    name === 'components' ? (ctx.client.components?.commands ?? []) : (ctx.client.commands?.values ?? []);
+  const before = loadedFiles(entries());
+  await handler.reloadAll(false);
+  const after = loadedFiles(entries());
+  const dropped = [...before].filter((path) => !after.has(path));
+  report.files += before.size - dropped.length;
+  report.failed += dropped.length;
+  if (!dropped.length) {
+    report.lines.push(`✅ ${name} · ${before.size} file${before.size === 1 ? '' : 's'}`);
+    return true;
+  }
+  report.lines.push(`❌ ${name} · ${before.size - dropped.length} reloaded, ${dropped.length} dropped`);
+  for (const path of dropped)
+    report.lines.push(`    ${shownPath(path)}: dropped (its entries are gone until a restart)`);
+  return false;
+}
+
+/** Loads the files Seyfert's handlers read again, in this worker only. */
 async function reloadFiles(ctx: ModeContext): Promise<ModeOutput> {
   const handlers = ctx.client as unknown as Record<string, FileHandler | undefined>;
-  const lines: string[] = [];
+  const report: FilesReport = { lines: [], files: 0, failed: 0, skipped: 0 };
   let ok = true;
-  for (const name of ['commands', 'components', 'events', 'langs']) {
+  for (const name of ['commands', 'components', 'events', 'langs'] as const) {
     const handler = handlers[name];
     if (typeof handler?.reloadAll !== 'function') continue;
     try {
-      await handler.reloadAll(false);
-      lines.push(`✅ ${name}`);
+      if (!(await reloadHandler(ctx, name, handler, report))) ok = false;
     } catch (err) {
       ok = false;
-      lines.push(`❌ ${name}: ${err instanceof Error ? err.message : String(err)}`);
+      report.lines.push(`❌ ${name}: ${shortError(ctx, err)}`);
     }
   }
   return {
     output: [
       'Reloaded the files Seyfert loads (this worker only):',
-      ...lines,
+      ...report.lines,
       '',
       'Your main file, services and the helpers these files import keep their old code.',
     ].join('\n'),
@@ -263,7 +365,7 @@ export const reloadModes: ByakuModeDefinition[] = [
     name: 'reload',
     aliases: ['rl'],
     description: 'Reload all bot code without going offline by replacing workers one by one',
-    usage: 'reload [all | <worker ids> | files] [--timeout=60s] [--drain=10s] [--continue]',
+    usage: 'reload [all | <worker ids> | files] [--timeout=60s] [--drain=10s] [--continue] [--force]',
     examples: ['reload', 'reload 0 2', 'reload files'],
     rerunnable: false,
     run(ctx) {

@@ -514,6 +514,11 @@ restart the bot once so the manager process runs the new Seyfert too. If the bot
 that hot reload needs the `WorkerManager`. If the manager never answers (it still runs an old Seyfert), the reload
 stops after 15 seconds and says so. `?by reload files` works on any setup.
 
+`?by reload files` lists every file it could not load again, with the error; those files keep their previous
+version. That report needs Seyfert 5.2.2-dev-44386046816.0 or newer. Older Seyferts reload without your handler's
+`onFile`, which drops files that export several classes, so on those Byaku skips a handler with a custom `onFile`
+(`--force` runs it anyway) and reports any file the reload dropped.
+
 </details>
 
 ## 🆚 jishaku and Dokdo
