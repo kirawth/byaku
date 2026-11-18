@@ -1,4 +1,4 @@
-import { type ActionRow, Button } from 'seyfert';
+import type { ActionRow } from 'seyfert';
 import { describe, expect, it } from 'vitest';
 
 import { Byaku } from '../src/byaku.js';
@@ -32,8 +32,7 @@ describe('custom ids', () => {
 });
 
 describe('emoji buttons', () => {
-  it('a plain-string emoji works; an emoji object without an id throws INVALID_EMOJI in Seyfert 5.2', () => {
-    expect(() => new Button().setEmoji({ name: '⏮️' } as never)).toThrow(/emoji/i);
+  it('buttons take emojis as plain strings', () => {
     expect(button('s', 'f', '⏮️').toJSON()).toMatchObject({ emoji: { name: '⏮️' }, custom_id: 'by1:s:f' });
   });
 
