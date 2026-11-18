@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Byaku } from '../src/byaku.js';
+import { MemorySessionStore } from '../src/session.js';
 import type { AuditEntry, ByakuOptions } from '../src/options.js';
 import { reloadEnvironment, reloadTimings, updateCommand } from '../src/modes/reload.js';
 import { CHANNEL_ID, FakeBot, OWNER_ID } from './helpers.js';
@@ -22,7 +23,7 @@ type Workers = { workerId: number; ok: boolean; error?: string; ms: number }[];
 
 async function setup(
   worker?: { id: number; total: number; reload?: (request: Request) => Promise<Workers> },
-  options: Omit<ByakuOptions, 'advanced'> = {},
+  options: Omit<ByakuOptions, 'advanced'> & { store?: MemorySessionStore } = {},
 ) {
   const bot = await FakeBot.create();
   if (worker) {
@@ -34,7 +35,8 @@ async function setup(
         : {}),
     });
   }
-  const byaku = new Byaku(bot.client, { ...options, advanced: { includeAppOwners: false } });
+  const { store, ...rest } = options;
+  const byaku = new Byaku(bot.client, { ...rest, advanced: { includeAppOwners: false, ...(store ? { store } : {}) } });
   await byaku.install();
   return { bot, byaku };
 }
@@ -429,5 +431,108 @@ describe('reload in the audit log', () => {
     const { bot, byaku } = await setup(undefined, { audit: (entry) => void entries.push(entry) });
     await reload(bot, byaku, 'js 1 + 1');
     expect(entries.find((e) => e.action === 'run')).not.toHaveProperty('details');
+  });
+});
+
+describe('finishing the reload message after this worker is replaced', () => {
+  beforeEach(() => {
+    seyfertSupportsHotReload(true);
+    reloadTimings.activePollMs = 5;
+  });
+  afterEach(() => {
+    reloadTimings.activePollMs = 500;
+  });
+
+  const pendingIn = async (store: MemorySessionStore) =>
+    (await store.list()).map((s) => s.data.pendingReload).filter(Boolean) as { workerId: number; expiresAt: number }[];
+
+  it('with a shared store, saves a pending reload while it runs and clears it after the result', async () => {
+    const store = new MemorySessionStore();
+    let during: { workerId: number; expiresAt: number }[] = [];
+    const { bot, byaku } = await setup(
+      {
+        id: 0,
+        total: 2,
+        reload: async (request) => {
+          during = await pendingIn(store);
+          return (request.workerIds ?? []).map((workerId) => ({ workerId, ok: true, ms: 10 }));
+        },
+      },
+      { store },
+    );
+
+    await reload(bot, byaku, 'reload');
+    expect(during).toHaveLength(1);
+    expect(during[0]?.workerId).toBe(0);
+    expect(during[0]?.expiresAt).toBeGreaterThan(Date.now());
+    expect(await pendingIn(store)).toHaveLength(0);
+  });
+
+  it('without a store, nothing is saved for a replacement', async () => {
+    let saved: unknown[] = ['not checked'];
+    const { bot, byaku } = await setup({
+      id: 0,
+      total: 2,
+      reload: async (request) => {
+        saved = (await byaku.sessions.store.list()).map((s) => s.data.pendingReload).filter(Boolean);
+        return (request.workerIds ?? []).map((workerId) => ({ workerId, ok: true, ms: 10 }));
+      },
+    });
+    await reload(bot, byaku, 'reload');
+    expect(saved).toEqual([]);
+  });
+
+  async function replacementOf(store: MemorySessionStore, finishedFirst: boolean) {
+    // The old worker's reload message, left pending as if that worker died before the result
+    const old = await FakeBot.create();
+    const oldByaku = new Byaku(old.client, { advanced: { includeAppOwners: false, store } });
+    await oldByaku.run({ ownerId: OWNER_ID, channelId: CHANNEL_ID, text: 'js 1', delivery: { kind: 'reply' } });
+    const [session] = await store.list();
+    session!.data.pendingReload = {
+      workerId: 0,
+      workerIds: [1, 0],
+      startedAt: Date.now() - 4000,
+      expiresAt: Date.now() + 60_000,
+    };
+    await store.set(session!);
+
+    // The replacement: the same worker id, on standby until the manager switches to it
+    let state: 'standby' | 'active' = 'standby';
+    Object.assign(old.client, {
+      workerData: { workerId: 0, totalWorkers: 2, shards: [0], totalShards: 2 },
+      tellWorker: () => undefined,
+    });
+    Object.defineProperty(old.client, 'isHotReloadReplacement', { get: () => true, configurable: true });
+    Object.defineProperty(old.client, 'hotReloadState', { get: () => state, configurable: true });
+    const replacement = new Byaku(old.client, { advanced: { includeAppOwners: false, store } });
+    await replacement.install();
+
+    const edits = () => old.calls.filter((c) => c.method === 'PATCH' && c.url.includes(session!.replyId!));
+    const before = edits().length;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(edits().length).toBe(before); // still on standby
+    if (finishedFirst) {
+      delete session!.data.pendingReload;
+      await store.set(session!);
+    }
+    state = 'active';
+    return { old, session: session!, edits, before };
+  }
+
+  it('a replacement on standby edits the message once, after it becomes active', async () => {
+    const store = new MemorySessionStore();
+    const { old, session, edits, before } = await replacementOf(store, false);
+    await vi.waitFor(() => expect(edits().length).toBe(before + 1));
+    expect(old.messages.get(session.replyId!)?.content).toMatch(/✅ Reload finished · worker 0 took over · \d/);
+    expect(await pendingIn(store)).toHaveLength(0);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(edits().length).toBe(before + 1);
+  });
+
+  it('a replacement leaves the message alone when the old worker finished it', async () => {
+    const store = new MemorySessionStore();
+    const { edits, before } = await replacementOf(store, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(edits().length).toBe(before);
   });
 });

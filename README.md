@@ -531,6 +531,11 @@ all. Seyfert's `resumeSession` option avoids that for one-shard workers with a s
 Not reloaded: the manager file itself, and anything kept in a worker's memory (cooldowns, collectors, eval
 variables).
 
+The worker you typed `?by reload` in is replaced too (last, by default). It normally gets the result before it
+drains and finishes the message itself. With a shared session store (`advanced.store`, for example Redis), its
+replacement also watches for that reload: if the old worker didn't get to finish the message, the new one edits it
+with "✅ Reload finished · worker N took over" once it takes over.
+
 **With Docker**, a hot reload loads the code that is already in the container's image, so it helps when files
 change inside the running container (a mounted volume, or a build run in it). To deploy a new version, rebuild the
 image and recreate the container (`docker compose up -d --build`). Byaku notices when it runs in a container and

@@ -39,6 +39,7 @@ import {
   ModeRegistry,
   type ModeReturn,
 } from './modes/index.js';
+import { finishPendingReload } from './modes/reload.js';
 import { type AuditEntry, ByakuError, type ByakuOptions, type ResolvedOptions, resolveOptions } from './options.js';
 import { escapeFences, paginate, Redactor, secretsFromEnv, truncate } from './output.js';
 import {
@@ -265,6 +266,10 @@ export class Byaku {
     installBridge(this.bridge);
     this.sessions.start();
     void this.refreshAppOwners();
+    // A hot reload replacement finishes the reload message its predecessor could not
+    void finishPendingReload(this).catch((err: unknown) =>
+      this.client.logger.warn('[byaku] could not finish a reload message:', errorMessage(err)),
+    );
   }
 
   /** Stops listening, kills running work and deactivates handlers. Plugin contributions are removed on client close. */

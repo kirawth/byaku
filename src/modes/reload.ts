@@ -7,6 +7,8 @@ import { errorMessage } from '../inspect.js';
 import { formatMs } from '../output.js';
 import { parseDuration } from '../options.js';
 import { currentWorkerId, isWorkerClient, totalWorkers } from '../workers.js';
+import type { Byaku } from '../byaku.js';
+import type { Session } from '../session.js';
 import type { ByakuModeDefinition, ModeContext, ModeOutput } from './index.js';
 import { seyfertVersion } from './system.js';
 
@@ -45,7 +47,7 @@ const ICON: Record<Stage | 'waiting', string> = {
 };
 
 /** @internal How long the WorkerManager has to answer a reload request; changed by tests. */
-export const reloadTimings = { managerAnswerMs: 15_000 };
+export const reloadTimings = { managerAnswerMs: 15_000, activePollMs: 500 };
 
 let containerCache: boolean | undefined;
 
@@ -145,6 +147,67 @@ function durationFlag(ctx: ModeContext, name: string): number | undefined {
   return parseDuration(value);
 }
 
+/** Saved on the reload's session while a hot reload that replaces this worker runs. */
+interface PendingReload {
+  workerId: number;
+  workerIds: number[];
+  startedAt: number;
+  expiresAt: number;
+}
+
+// Seyfert's default ready timeout is 60 s plus the connect queue; the drain default is 10 s
+const DEFAULT_READY_MS = 90_000;
+const DEFAULT_DRAIN_MS = 10_000;
+const HAND_OFF_MARGIN_MS = 60_000;
+
+function pendingReload(session: Session): PendingReload | undefined {
+  const pending = session.data.pendingReload as PendingReload | undefined;
+  return pending && typeof pending.workerId === 'number' && typeof pending.expiresAt === 'number' ? pending : undefined;
+}
+
+/** What Seyfert's WorkerClient (5.2.2-dev-44386046816.0 and newer) says about a hot reload. */
+interface HotReloadStateClient {
+  readonly isHotReloadReplacement?: boolean;
+  readonly hotReloadState?: 'active' | 'standby' | 'stopped';
+}
+
+/**
+ * @internal On a worker that replaced the one running `reload`, finishes that reload's message once this worker
+ * takes over, when the old worker didn't live to do it. Needs a shared session store. Resolves to true when it
+ * edited the message.
+ */
+export async function finishPendingReload(byaku: Byaku): Promise<boolean> {
+  const client = byaku.client as unknown as HotReloadStateClient;
+  if (!byaku.options.store || client.isHotReloadReplacement !== true) return false;
+  const self = currentWorkerId(byaku.client);
+  const find = async () =>
+    (await byaku.sessions.store.list()).find((session) => {
+      const pending = pendingReload(session);
+      return pending?.workerId === self && pending.expiresAt > Date.now();
+    });
+
+  const first = await find();
+  const pending = first && pendingReload(first);
+  if (!pending) return false;
+  // A replacement starts on standby and only builds its cache until the manager switches to it
+  while (client.hotReloadState !== 'active') {
+    if (client.hotReloadState === 'stopped' || Date.now() > pending.expiresAt) return false;
+    await new Promise((resolve) => setTimeout(resolve, reloadTimings.activePollMs).unref?.());
+  }
+
+  // The old worker may have finished the message in the meantime
+  const session = await find();
+  if (!session) return false;
+  delete session.data.pendingReload;
+  delete session.live;
+  session.output = `${session.output}\n\n✅ Reload finished · worker ${self} took over · ${formatMs(Date.now() - pending.startedAt)}`;
+  session.pages = [session.output];
+  session.page = 0;
+  await byaku.sessions.save(session);
+  if (session.replyId) await byaku.editSession(session);
+  return true;
+}
+
 function managerSilent(): string {
   return (
     'The WorkerManager did not answer the reload request. Its process probably still runs an older Seyfert: ' +
@@ -178,6 +241,19 @@ async function hotReload(ctx: ModeContext, client: HotReloadClient): Promise<Mod
     ].join('\n');
 
   const live = await ctx.live({ kind: 'reload', render });
+  // With a shared store, this worker's replacement can finish the message if this worker never sees the result
+  const handOff = Boolean(ctx.byaku.options.store) && ids.includes(self);
+  if (handOff) {
+    const perWorker = (readyTimeout ?? DEFAULT_READY_MS) + (drainTimeout ?? DEFAULT_DRAIN_MS);
+    const pending: PendingReload = {
+      workerId: self,
+      workerIds: ids,
+      startedAt: started,
+      expiresAt: started + perWorker * ids.length + HAND_OFF_MARGIN_MS,
+    };
+    ctx.session.data.pendingReload = pending;
+    await ctx.byaku.sessions.save(ctx.session);
+  }
   let answered = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const noAnswer = new Promise<never>((_, reject) => {
@@ -203,6 +279,8 @@ async function hotReload(ctx: ModeContext, client: HotReloadClient): Promise<Mod
   } finally {
     answered = true;
     clearTimeout(timer);
+    // This worker saw the result, so the replacement has nothing to finish; Byaku saves the session after the run
+    delete ctx.session.data.pendingReload;
   }
 
   for (const worker of result.workers) {
