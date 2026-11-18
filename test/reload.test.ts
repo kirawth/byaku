@@ -1,7 +1,12 @@
 import { WorkerClient } from 'seyfert';
-import { describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Byaku } from '../src/byaku.js';
+import { reloadTimings, updateCommand } from '../src/modes/reload.js';
 import { CHANNEL_ID, FakeBot, OWNER_ID } from './helpers.js';
 
 interface Request {
@@ -30,12 +35,27 @@ async function setup(worker?: { id: number; total: number; reload?: (request: Re
   return { bot, byaku };
 }
 
+// Byaku checks Seyfert's WorkerClient for hot reload support; the tests switch it on and off
+const proto = WorkerClient.prototype as unknown as Record<string, unknown>;
+const original = Object.getOwnPropertyDescriptor(proto, 'requestHotReload');
+function seyfertSupportsHotReload(on: boolean) {
+  if (on) proto.requestHotReload = original?.value ?? (() => Promise.resolve({ workers: [] }));
+  else delete proto.requestHotReload;
+}
+afterEach(() => {
+  if (original) Object.defineProperty(proto, 'requestHotReload', original);
+  else delete proto.requestHotReload;
+  reloadTimings.managerAnswerMs = 15_000;
+});
+
 async function reload(bot: FakeBot, byaku: Byaku, text: string): Promise<string> {
   await byaku.run({ ownerId: OWNER_ID, channelId: CHANNEL_ID, text, delivery: { kind: 'reply' } });
   return [...bot.messages.values()].at(-1)?.content ?? '';
 }
 
 describe('reload', () => {
+  beforeEach(() => seyfertSupportsHotReload(true));
+
   it('hot reloads every worker with this one last and reports each stage', async () => {
     const requests: Request[] = [];
     const { bot, byaku } = await setup({
@@ -90,30 +110,67 @@ describe('reload', () => {
     expect(reloadFn).not.toHaveBeenCalled();
   });
 
-  it('without the WorkerManager it reloads Seyfert’s file handlers and says what it could not reload', async () => {
+  it('tells the owner to update Seyfert when it has no hot reload, with the command for their package manager', async () => {
+    seyfertSupportsHotReload(false);
+    const reloadFn = vi.fn(async () => []);
+    const { bot, byaku } = await setup({ id: 0, total: 2, reload: reloadFn });
+
+    const content = await reload(bot, byaku, 'reload');
+    expect(content).toMatch(/✖ Seyfert \S+ is too old: hot reload needs WorkerManager\.hotReload/);
+    expect(content).toContain(updateCommand());
+    expect(content).toContain('restart the bot once');
+    expect(content).toContain('reload files');
+    expect(content).toContain('❌');
+    expect(reloadFn).not.toHaveBeenCalled();
+  });
+
+  it('on a single Client it explains that hot reload needs the WorkerManager', async () => {
+    const { bot, byaku } = await setup();
+    const content = await reload(bot, byaku, 'reload');
+    expect(content).toContain('The bot runs on a single Client');
+    expect(content).not.toContain('too old');
+
+    seyfertSupportsHotReload(false);
+    const both = await reload(bot, byaku, 'reload');
+    expect(both).toContain('too old');
+    expect(both).toContain('single Client');
+  });
+
+  it('fails with a clear message when the WorkerManager never answers (still on an old Seyfert)', async () => {
+    reloadTimings.managerAnswerMs = 50;
+    const { bot, byaku } = await setup({ id: 0, total: 2, reload: () => new Promise(() => undefined) });
+    const content = await reload(bot, byaku, 'reload');
+    expect(content).toContain('The WorkerManager did not answer the reload request');
+    expect(content).toContain('restart the bot once after updating Seyfert');
+  });
+
+  it('"reload files" loads the Seyfert file handlers again on any client and reports each one', async () => {
+    seyfertSupportsHotReload(false);
     const { bot, byaku } = await setup();
     const commands = vi.spyOn(bot.client.commands, 'reloadAll').mockResolvedValue();
     const events = vi.spyOn(bot.client.events!, 'reloadAll').mockRejectedValue(new Error('bad event file'));
 
-    const content = await reload(bot, byaku, 'reload');
+    const content = await reload(bot, byaku, 'reload files');
     expect(commands).toHaveBeenCalledWith(false);
-    expect(events).toHaveBeenCalled();
+    expect(content).toContain('Reloaded the files Seyfert loads');
     expect(content).toContain('✅ commands');
+    expect(events).toHaveBeenCalled();
     expect(content).toContain('❌ events: bad event file');
-    expect(content).toContain('needs the bot to run on Seyfert’s WorkerManager');
   });
 
-  it('on a worker without hot reload support, or with "files", only the file handlers reload', async () => {
-    const old = await setup({ id: 0, total: 2 });
-    expect(await reload(old.bot, old.byaku, 'reload')).toContain(
-      'needs a Seyfert version with WorkerManager.hotReload',
-    );
-
-    const reloadFn = vi.fn(async () => []);
-    const { bot, byaku } = await setup({ id: 0, total: 2, reload: reloadFn });
-    const content = await reload(bot, byaku, 'reload files');
-    expect(content).toContain('Reloaded the files Seyfert loads');
-    expect(reloadFn).not.toHaveBeenCalled();
+  it('picks the update command from the nearest lockfile', () => {
+    const root = mkdtempSync(join(tmpdir(), 'byaku-lock-'));
+    try {
+      const app = join(root, 'apps', 'bot');
+      mkdirSync(app, { recursive: true });
+      expect(updateCommand(app)).toBe('npm install seyfert@dev');
+      writeFileSync(join(root, 'pnpm-lock.yaml'), '');
+      expect(updateCommand(app)).toBe('pnpm add seyfert@dev');
+      writeFileSync(join(app, 'yarn.lock'), '');
+      expect(updateCommand(app)).toBe('yarn add seyfert@dev');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

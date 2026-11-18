@@ -501,7 +501,13 @@ all. Seyfert's `resumeSession` option avoids that for one-shard workers with a s
 `manager.hotReload({ resumeSession: true })` from your manager file for it.
 
 Not reloaded: the manager file itself, and anything kept in a worker's memory (cooldowns, collectors, eval
-variables). Without the `WorkerManager`, `?by reload` falls back to `files` and says so.
+variables).
+
+`?by reload` checks the setup first. If the installed Seyfert is too old, it shows the version it found and the
+update command for your package manager (`pnpm add seyfert@dev`, `npm install seyfert@dev`, …); after updating,
+restart the bot once so the manager process runs the new Seyfert too. If the bot runs on a single `Client`, it says
+that hot reload needs the `WorkerManager`. If the manager never answers (it still runs an old Seyfert), the reload
+stops after 15 seconds and says so. `?by reload files` works on any setup.
 
 </details>
 

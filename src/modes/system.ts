@@ -18,7 +18,8 @@ function gatewayOf(client: object): Client['gateway'] | undefined {
   return client instanceof Client ? client.gateway : undefined;
 }
 
-function seyfertVersion(): string {
+/** The Seyfert version the bot has installed, or `?`. */
+export function seyfertVersion(): string {
   try {
     return (createRequire(join(process.cwd(), 'index.js'))('seyfert/package.json') as { version: string }).version;
   } catch {

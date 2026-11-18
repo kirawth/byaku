@@ -1,7 +1,13 @@
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
+import { WorkerClient } from 'seyfert';
+
 import { formatMs } from '../output.js';
 import { parseDuration } from '../options.js';
 import { currentWorkerId, isWorkerClient, totalWorkers } from '../workers.js';
 import type { ByakuModeDefinition, ModeContext, ModeOutput } from './index.js';
+import { seyfertVersion } from './system.js';
 
 // Seyfert's hot reload types, kept local so Byaku still type-checks against versions without them
 type Stage = 'spawning' | 'connecting' | 'ready' | 'switching' | 'draining' | 'done' | 'failed';
@@ -41,8 +47,56 @@ const ICON: Record<Stage | 'waiting', string> = {
   failed: '❌',
 };
 
-function canHotReload(client: object): client is HotReloadClient {
-  return isWorkerClient(client as never) && typeof (client as Partial<HotReloadClient>).requestHotReload === 'function';
+/** @internal How long the WorkerManager has to answer a reload request; changed by tests. */
+export const reloadTimings = { managerAnswerMs: 15_000 };
+
+/** Whether the installed Seyfert has WorkerManager.hotReload (added after 5.2.1). */
+function seyfertHasHotReload(): boolean {
+  return typeof (WorkerClient.prototype as Partial<HotReloadClient>).requestHotReload === 'function';
+}
+
+/** The install command for the package manager whose lockfile is nearest to the bot's folder. */
+export function updateCommand(cwd = process.cwd()): string {
+  const managers: [string, string][] = [
+    ['pnpm-lock.yaml', 'pnpm add seyfert@dev'],
+    ['yarn.lock', 'yarn add seyfert@dev'],
+    ['bun.lock', 'bun add seyfert@dev'],
+    ['bun.lockb', 'bun add seyfert@dev'],
+    ['package-lock.json', 'npm install seyfert@dev'],
+  ];
+  for (let dir = cwd; ; dir = dirname(dir)) {
+    const found = managers.find(([lockfile]) => existsSync(join(dir, lockfile)));
+    if (found) return found[1];
+    if (dirname(dir) === dir) return 'npm install seyfert@dev';
+  }
+}
+
+/** Why a full reload can't run here and what to do about it, or `undefined` when it can. */
+function hotReloadBlocker(ctx: ModeContext): string | undefined {
+  const hasHotReload = seyfertHasHotReload();
+  const onWorkers = isWorkerClient(ctx.client);
+  if (hasHotReload && onWorkers) return undefined;
+  const lines: string[] = ['A full reload is not available on this bot.', ''];
+  if (!hasHotReload) {
+    lines.push(
+      `✖ Seyfert ${seyfertVersion()} is too old: hot reload needs WorkerManager.hotReload, added after 5.2.1.`,
+      "  Update Seyfert in your bot's folder:",
+      '',
+      `    ${updateCommand()}`,
+      '',
+      '  (seyfert@latest works too once a release newer than 5.2.1 is out.)',
+      '  Then restart the bot once, so the WorkerManager process also runs the new version.',
+    );
+  }
+  if (!onWorkers) {
+    if (!hasHotReload) lines.push('');
+    lines.push(
+      '✖ The bot runs on a single Client. Hot reload replaces workers, so the bot has to start through',
+      "  Seyfert's WorkerManager (mode 'clusters' or 'threads').",
+    );
+  }
+  lines.push('', 'To load only the command, component, event and lang files again: reload files');
+  return lines.join('\n');
 }
 
 /** Worker ids from the input, or every worker with this one last so it can report the others first. */
@@ -69,6 +123,10 @@ function durationFlag(ctx: ModeContext, name: string): number | undefined {
   return parseDuration(value);
 }
 
+const MANAGER_SILENT =
+  'The WorkerManager did not answer the reload request. Its process probably still runs an older Seyfert: ' +
+  'restart the bot once after updating Seyfert, then try again.';
+
 async function hotReload(ctx: ModeContext, client: HotReloadClient): Promise<ModeOutput> {
   const ids = workerIds(ctx);
   const self = currentWorkerId(ctx.client);
@@ -93,17 +151,32 @@ async function hotReload(ctx: ModeContext, client: HotReloadClient): Promise<Mod
     ].join('\n');
 
   const live = await ctx.live({ kind: 'reload', render });
-  const result = await client.requestHotReload({
+  let answered = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const noAnswer = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      if (!answered) reject(new Error(MANAGER_SILENT));
+    }, reloadTimings.managerAnswerMs);
+  });
+  const request = client.requestHotReload({
     workerIds: ids,
     ...(readyTimeout !== undefined ? { readyTimeout } : {}),
     ...(drainTimeout !== undefined ? { drainTimeout } : {}),
     ...(ctx.flags.continue ? { continueOnError: true } : {}),
     onProgress: (event) => {
+      answered = true;
       stages.set(event.workerId, event.stage);
       if (event.error) errors.set(event.workerId, event.error);
       live.update();
     },
   });
+  let result: Result;
+  try {
+    result = await Promise.race([request, noAnswer]);
+  } finally {
+    answered = true;
+    clearTimeout(timer);
+  }
 
   for (const worker of result.workers) {
     stages.set(worker.workerId, worker.ok ? 'done' : 'failed');
@@ -128,7 +201,7 @@ async function hotReload(ctx: ModeContext, client: HotReloadClient): Promise<Mod
 }
 
 /** Without the WorkerManager only Seyfert's file handlers can be loaded again. */
-async function reloadFiles(ctx: ModeContext, reason?: string): Promise<ModeOutput> {
+async function reloadFiles(ctx: ModeContext): Promise<ModeOutput> {
   const handlers = ctx.client as unknown as Record<string, FileHandler | undefined>;
   const lines: string[] = [];
   let ok = true;
@@ -149,7 +222,6 @@ async function reloadFiles(ctx: ModeContext, reason?: string): Promise<ModeOutpu
       ...lines,
       '',
       'Your main file, services and the helpers these files import keep their old code.',
-      ...(reason ? [reason] : []),
     ].join('\n'),
     ok,
   };
@@ -165,13 +237,9 @@ export const reloadModes: ByakuModeDefinition[] = [
     rerunnable: false,
     run(ctx) {
       if (ctx.input.trim() === 'files') return reloadFiles(ctx);
-      if (canHotReload(ctx.client)) return hotReload(ctx, ctx.client);
-      return reloadFiles(
-        ctx,
-        isWorkerClient(ctx.client)
-          ? 'A full reload needs a Seyfert version with WorkerManager.hotReload.'
-          : 'A full reload needs the bot to run on Seyfert’s WorkerManager.',
-      );
+      const blocker = hotReloadBlocker(ctx);
+      if (blocker) return { output: blocker, ok: false };
+      return hotReload(ctx, ctx.client as unknown as HotReloadClient);
     },
   },
 ];
