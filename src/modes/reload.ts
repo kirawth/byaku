@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { WorkerClient } from 'seyfert';
@@ -50,6 +50,29 @@ const ICON: Record<Stage | 'waiting', string> = {
 /** @internal How long the WorkerManager has to answer a reload request; changed by tests. */
 export const reloadTimings = { managerAnswerMs: 15_000 };
 
+let containerCache: boolean | undefined;
+
+/** Whether this process runs in a container (Docker, containerd, Kubernetes); checked once. */
+function detectContainer(): boolean {
+  if (containerCache !== undefined) return containerCache;
+  let found = existsSync('/.dockerenv');
+  if (!found) {
+    try {
+      found = /docker|containerd|kubepods/.test(readFileSync('/proc/1/cgroup', 'utf8'));
+    } catch {
+      // Not Linux, or /proc is not readable
+    }
+  }
+  return (containerCache = found);
+}
+
+/** @internal Where the bot runs; tests replace `inContainer`. */
+export const reloadEnvironment = { inContainer: detectContainer };
+
+const CONTAINER_NOTE =
+  "Hot reload loads the code already in this container's image. To deploy new code, rebuild the image and " +
+  'recreate the container (`docker compose up -d --build`).';
+
 /** Whether the installed Seyfert has WorkerManager.hotReload (added after 5.2.1). */
 function seyfertHasHotReload(): boolean {
   return typeof (WorkerClient.prototype as Partial<HotReloadClient>).requestHotReload === 'function';
@@ -85,7 +108,9 @@ function hotReloadBlocker(ctx: ModeContext): string | undefined {
       `    ${updateCommand()}`,
       '',
       '  (seyfert@latest works too once a release newer than 5.2.1 is out.)',
-      '  Then restart the bot once, so the WorkerManager process also runs the new version.',
+      reloadEnvironment.inContainer()
+        ? '  Then rebuild the image with the new Seyfert and recreate the container (`docker compose up -d --build`).'
+        : '  Then restart the bot once, so the WorkerManager process also runs the new version.',
     );
   }
   if (!onWorkers) {
@@ -123,9 +148,14 @@ function durationFlag(ctx: ModeContext, name: string): number | undefined {
   return parseDuration(value);
 }
 
-const MANAGER_SILENT =
-  'The WorkerManager did not answer the reload request. Its process probably still runs an older Seyfert: ' +
-  'restart the bot once after updating Seyfert, then try again.';
+function managerSilent(): string {
+  return (
+    'The WorkerManager did not answer the reload request. Its process probably still runs an older Seyfert: ' +
+    (reloadEnvironment.inContainer()
+      ? 'recreate the container so the WorkerManager process runs the new Seyfert, then try again.'
+      : 'restart the bot once after updating Seyfert, then try again.')
+  );
+}
 
 async function hotReload(ctx: ModeContext, client: HotReloadClient): Promise<ModeOutput> {
   const ids = workerIds(ctx);
@@ -155,7 +185,7 @@ async function hotReload(ctx: ModeContext, client: HotReloadClient): Promise<Mod
   let timer: ReturnType<typeof setTimeout> | undefined;
   const noAnswer = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      if (!answered) reject(new Error(MANAGER_SILENT));
+      if (!answered) reject(new Error(managerSilent()));
     }, reloadTimings.managerAnswerMs);
   });
   const request = client.requestHotReload({
@@ -191,6 +221,7 @@ async function hotReload(ctx: ModeContext, client: HotReloadClient): Promise<Mod
     ids.includes(self) && result.workers.some((w) => w.workerId === self && w.ok)
       ? 'This worker was replaced; the buttons below stop working once it drains.'
       : '',
+    reloadEnvironment.inContainer() ? CONTAINER_NOTE : '',
   ].filter(Boolean);
 
   return {

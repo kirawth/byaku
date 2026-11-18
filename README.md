@@ -503,6 +503,11 @@ all. Seyfert's `resumeSession` option avoids that for one-shard workers with a s
 Not reloaded: the manager file itself, and anything kept in a worker's memory (cooldowns, collectors, eval
 variables).
 
+**With Docker**, a hot reload loads the code that is already in the container's image, so it helps when files
+change inside the running container (a mounted volume, or a build run in it). To deploy a new version, rebuild the
+image and recreate the container (`docker compose up -d --build`). Byaku notices when it runs in a container and
+adjusts its hints: after updating Seyfert, it asks you to rebuild and recreate instead of restarting the bot.
+
 `?by reload` checks the setup first. If the installed Seyfert is too old, it shows the version it found and the
 update command for your package manager (`pnpm add seyfert@dev`, `npm install seyfert@dev`, …); after updating,
 restart the bot once so the manager process runs the new Seyfert too. If the bot runs on a single `Client`, it says

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Byaku } from '../src/byaku.js';
-import { reloadTimings, updateCommand } from '../src/modes/reload.js';
+import { reloadEnvironment, reloadTimings, updateCommand } from '../src/modes/reload.js';
 import { CHANNEL_ID, FakeBot, OWNER_ID } from './helpers.js';
 
 interface Request {
@@ -42,10 +42,16 @@ function seyfertSupportsHotReload(on: boolean) {
   if (on) proto.requestHotReload = original?.value ?? (() => Promise.resolve({ workers: [] }));
   else delete proto.requestHotReload;
 }
+const detectContainer = reloadEnvironment.inContainer;
+// The tests run in Docker on Linux too, so each one starts outside a container
+beforeEach(() => {
+  reloadEnvironment.inContainer = () => false;
+});
 afterEach(() => {
   if (original) Object.defineProperty(proto, 'requestHotReload', original);
   else delete proto.requestHotReload;
   reloadTimings.managerAnswerMs = 15_000;
+  reloadEnvironment.inContainer = detectContainer;
 });
 
 async function reload(bot: FakeBot, byaku: Byaku, text: string): Promise<string> {
@@ -216,5 +222,46 @@ describe.skipIf(!('requestHotReload' in WorkerClient.prototype))('reload through
     expect(content).toMatch(/✅ worker 0 {2}done/);
     expect(content).toMatch(/✅ worker 1 {2}done .*\(this worker\)/);
     expect(content).toContain('2/2 reloaded');
+  });
+});
+
+describe('reload inside a container', () => {
+  beforeEach(() => seyfertSupportsHotReload(true));
+
+  const allDone = async (request: Request) =>
+    (request.workerIds ?? []).map((workerId) => ({ workerId, ok: true, ms: 10 }));
+
+  it('adds the image note to a hot reload only in a container', async () => {
+    for (const inContainer of [true, false]) {
+      reloadEnvironment.inContainer = () => inContainer;
+      const { bot, byaku } = await setup({ id: 0, total: 2, reload: allDone });
+      const content = await reload(bot, byaku, 'reload');
+      expect(content.includes("loads the code already in this container's image")).toBe(inContainer);
+      expect(content.includes('docker compose up -d --build')).toBe(inContainer);
+    }
+  });
+
+  it('tells the owner to rebuild the image instead of restarting when Seyfert is too old', async () => {
+    seyfertSupportsHotReload(false);
+    for (const inContainer of [true, false]) {
+      reloadEnvironment.inContainer = () => inContainer;
+      const { bot, byaku } = await setup({ id: 0, total: 2, reload: allDone });
+      const content = await reload(bot, byaku, 'reload');
+      expect(content.includes('rebuild the image with the new Seyfert and recreate the container')).toBe(inContainer);
+      expect(content.includes('Then restart the bot once')).toBe(!inContainer);
+    }
+  });
+
+  it('tells the owner to recreate the container when the manager never answers', async () => {
+    reloadTimings.managerAnswerMs = 50;
+    for (const inContainer of [true, false]) {
+      reloadEnvironment.inContainer = () => inContainer;
+      const { bot, byaku } = await setup({ id: 0, total: 2, reload: () => new Promise(() => undefined) });
+      const content = await reload(bot, byaku, 'reload');
+      expect(content.includes('recreate the container so the WorkerManager process runs the new Seyfert')).toBe(
+        inContainer,
+      );
+      expect(content.includes('restart the bot once after updating Seyfert')).toBe(!inContainer);
+    }
   });
 });
