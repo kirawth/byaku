@@ -1,4 +1,4 @@
-import { WorkerClient } from 'seyfert';
+import { Client, WorkerClient } from 'seyfert';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,7 +6,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Byaku } from '../src/byaku.js';
-import { reloadTimings, updateCommand } from '../src/modes/reload.js';
+import { MemorySessionStore } from '../src/session.js';
+import type { AuditEntry, ByakuOptions } from '../src/options.js';
+import { reloadEnvironment, reloadTimings, updateCommand } from '../src/modes/reload.js';
 import { CHANNEL_ID, FakeBot, OWNER_ID } from './helpers.js';
 
 interface Request {
@@ -19,7 +21,10 @@ interface Request {
 
 type Workers = { workerId: number; ok: boolean; error?: string; ms: number }[];
 
-async function setup(worker?: { id: number; total: number; reload?: (request: Request) => Promise<Workers> }) {
+async function setup(
+  worker?: { id: number; total: number; reload?: (request: Request) => Promise<Workers> },
+  options: Omit<ByakuOptions, 'advanced'> & { store?: MemorySessionStore } = {},
+) {
   const bot = await FakeBot.create();
   if (worker) {
     Object.assign(bot.client, {
@@ -30,7 +35,8 @@ async function setup(worker?: { id: number; total: number; reload?: (request: Re
         : {}),
     });
   }
-  const byaku = new Byaku(bot.client, { advanced: { includeAppOwners: false } });
+  const { store, ...rest } = options;
+  const byaku = new Byaku(bot.client, { ...rest, advanced: { includeAppOwners: false, ...(store ? { store } : {}) } });
   await byaku.install();
   return { bot, byaku };
 }
@@ -42,10 +48,16 @@ function seyfertSupportsHotReload(on: boolean) {
   if (on) proto.requestHotReload = original?.value ?? (() => Promise.resolve({ workers: [] }));
   else delete proto.requestHotReload;
 }
+const detectContainer = reloadEnvironment.inContainer;
+// The tests run in Docker on Linux too, so each one starts outside a container
+beforeEach(() => {
+  reloadEnvironment.inContainer = () => false;
+});
 afterEach(() => {
   if (original) Object.defineProperty(proto, 'requestHotReload', original);
   else delete proto.requestHotReload;
   reloadTimings.managerAnswerMs = 15_000;
+  reloadEnvironment.inContainer = detectContainer;
 });
 
 async function reload(bot: FakeBot, byaku: Byaku, text: string): Promise<string> {
@@ -144,19 +156,127 @@ describe('reload', () => {
     expect(content).toContain('restart the bot once after updating Seyfert');
   });
 
-  it('"reload files" loads the Seyfert file handlers again on any client and reports each one', async () => {
-    seyfertSupportsHotReload(false);
-    const { bot, byaku } = await setup();
-    const commands = vi.spyOn(bot.client.commands, 'reloadAll').mockResolvedValue();
-    const events = vi.spyOn(bot.client.events!, 'reloadAll').mockRejectedValue(new Error('bad event file'));
+  describe('"reload files"', () => {
+    // Replaces one of the bot's handlers with a fake for a test
+    const fake = (bot: FakeBot, name: 'commands' | 'components' | 'events' | 'langs', handler: object) =>
+      Object.defineProperty(bot.client, name, { value: handler, configurable: true, writable: true });
 
-    const content = await reload(bot, byaku, 'reload files');
-    expect(commands).toHaveBeenCalledWith(false);
-    expect(content).toContain('Reloaded the files Seyfert loads');
-    expect(content).toContain('✅ commands');
-    expect(events).toHaveBeenCalled();
-    expect(content).toContain('❌ events: bad event file');
+    it("lists each failed file from Seyfert's reload report, relative to the bot's folder", async () => {
+      const { bot, byaku } = await setup();
+      fake(bot, 'components', {
+        reloadAll: vi.fn(),
+        reloadFiles: vi.fn(async () => ({
+          reloaded: [join(process.cwd(), 'src/components/ok.ts')],
+          failed: [
+            {
+              path: join(process.cwd(), 'src/components/broken.ts'),
+              error: new SyntaxError('Unexpected token\nat line 3'),
+            },
+          ],
+        })),
+      });
+      fake(bot, 'commands', {
+        reloadAll: vi.fn(),
+        reloadFiles: vi.fn(async () => ({ reloaded: ['a', 'b'], failed: [] })),
+      });
+
+      const content = await reload(bot, byaku, 'reload files');
+      expect(content).toContain('✅ commands · 2 files');
+      expect(content).toContain('❌ components · 1 reloaded, 1 failed');
+      expect(content).toContain(`${join('src', 'components', 'broken.ts')}: Unexpected token`);
+      expect(content).not.toContain('at line 3');
+      expect(content).toContain('❌');
+      expect(content).toContain('Your main file, services and the helpers these files import keep their old code.');
+    });
+
+    it('on an older Seyfert, reports files its reload dropped', async () => {
+      const { bot, byaku } = await setup();
+      const components = {
+        commands: [{ __filePath: '/bot/a.js' }, { __filePath: '/bot/a.js' }, { __filePath: '/bot/b.js' }],
+        reloadAll: vi.fn(async function (this: { commands: object[] }) {
+          this.commands = [{ __filePath: '/bot/b.js' }];
+        }),
+      };
+      fake(bot, 'components', components);
+
+      const content = await reload(bot, byaku, 'reload files');
+      expect(components.reloadAll).toHaveBeenCalledWith(false);
+      expect(content).toContain('❌ components · 1 reloaded, 1 dropped');
+      expect(content).toMatch(/a\.js: dropped/);
+    });
+
+    it('on an older Seyfert, skips a handler with a custom onFile unless --force', async () => {
+      class Handler {
+        commands = [{ __filePath: '/bot/a.js' }];
+        reloadAll = vi.fn(async () => undefined);
+        onFile(): unknown[] {
+          return [];
+        }
+      }
+      class Custom extends Handler {
+        override onFile(): unknown[] {
+          return [1];
+        }
+      }
+      const { bot, byaku } = await setup();
+      for (const handler of [Object.assign(new Handler(), { onFile: () => [] }), new Custom()]) {
+        fake(bot, 'components', handler);
+        const content = await reload(bot, byaku, 'reload files');
+        expect(content).toContain("⚠️ components skipped: this Seyfert's reload ignores your onFile");
+        expect(content).toContain(updateCommand());
+        expect(handler.reloadAll).not.toHaveBeenCalled();
+
+        expect(await reload(bot, byaku, 'reload --force files')).toContain('✅ components · 1 file');
+        expect(handler.reloadAll).toHaveBeenCalledWith(false);
+      }
+
+      // Seyfert's own onFile is not custom
+      const plain = new Handler();
+      fake(bot, 'components', plain);
+      expect(await reload(bot, byaku, 'reload files')).toContain('✅ components · 1 file');
+    });
+
+    it('reloads events and langs as a whole and reports their errors', async () => {
+      const { bot, byaku } = await setup();
+      fake(bot, 'events', { reloadAll: vi.fn(async () => undefined) });
+      fake(bot, 'langs', { reloadAll: vi.fn(async () => Promise.reject(new Error('bad lang file'))) });
+      const content = await reload(bot, byaku, 'reload files');
+      expect(content).toContain('✅ events');
+      expect(content).toContain('❌ langs: bad lang file');
+    });
   });
+
+  it.skipIf(!('reloadFiles' in Object.getPrototypeOf(new Client().components)))(
+    '"reload files" keeps every entry of a file that exports several components (real Seyfert)',
+    async () => {
+      const parent = join(process.cwd(), 'node_modules', '.cache');
+      mkdirSync(parent, { recursive: true });
+      const dir = mkdtempSync(join(parent, 'byaku-components-'));
+      try {
+        writeFileSync(join(dir, 'package.json'), JSON.stringify({ type: 'module' }));
+        writeFileSync(
+          join(dir, 'pair.js'),
+          `import { ComponentCommand } from ${JSON.stringify(import.meta.resolve('seyfert'))};
+export default [
+  class Yes extends ComponentCommand { componentType = 'Button'; customId = 'pair-yes'; run() {} },
+  class Pick extends ComponentCommand { componentType = 'StringSelect'; customId = 'pair-pick'; run() {} },
+];
+`,
+        );
+        const { bot, byaku } = await setup();
+        bot.client.components.onFile = (file) => [file.default ?? []].flat();
+        await bot.client.components.load(dir);
+        const fromFile = () => bot.client.components.commands.filter((c) => (c as { __filePath?: string }).__filePath);
+        expect(fromFile()).toHaveLength(2);
+
+        const content = await reload(bot, byaku, 'reload files');
+        expect(content).toContain('✅ components · 1 file');
+        expect(fromFile()).toHaveLength(2);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('picks the update command from the nearest lockfile', () => {
     const root = mkdtempSync(join(tmpdir(), 'byaku-lock-'));
@@ -216,5 +336,203 @@ describe.skipIf(!('requestHotReload' in WorkerClient.prototype))('reload through
     expect(content).toMatch(/✅ worker 0 {2}done/);
     expect(content).toMatch(/✅ worker 1 {2}done .*\(this worker\)/);
     expect(content).toContain('2/2 reloaded');
+  });
+});
+
+describe('reload inside a container', () => {
+  beforeEach(() => seyfertSupportsHotReload(true));
+
+  const allDone = async (request: Request) =>
+    (request.workerIds ?? []).map((workerId) => ({ workerId, ok: true, ms: 10 }));
+
+  it('adds the image note to a hot reload only in a container', async () => {
+    for (const inContainer of [true, false]) {
+      reloadEnvironment.inContainer = () => inContainer;
+      const { bot, byaku } = await setup({ id: 0, total: 2, reload: allDone });
+      const content = await reload(bot, byaku, 'reload');
+      expect(content.includes("loads the code already in this container's image")).toBe(inContainer);
+      expect(content.includes('docker compose up -d --build')).toBe(inContainer);
+    }
+  });
+
+  it('tells the owner to rebuild the image instead of restarting when Seyfert is too old', async () => {
+    seyfertSupportsHotReload(false);
+    for (const inContainer of [true, false]) {
+      reloadEnvironment.inContainer = () => inContainer;
+      const { bot, byaku } = await setup({ id: 0, total: 2, reload: allDone });
+      const content = await reload(bot, byaku, 'reload');
+      expect(content.includes('rebuild the image with the new Seyfert and recreate the container')).toBe(inContainer);
+      expect(content.includes('Then restart the bot once')).toBe(!inContainer);
+    }
+  });
+
+  it('tells the owner to recreate the container when the manager never answers', async () => {
+    reloadTimings.managerAnswerMs = 50;
+    for (const inContainer of [true, false]) {
+      reloadEnvironment.inContainer = () => inContainer;
+      const { bot, byaku } = await setup({ id: 0, total: 2, reload: () => new Promise(() => undefined) });
+      const content = await reload(bot, byaku, 'reload');
+      expect(content.includes('recreate the container so the WorkerManager process runs the new Seyfert')).toBe(
+        inContainer,
+      );
+      expect(content.includes('restart the bot once after updating Seyfert')).toBe(!inContainer);
+    }
+  });
+});
+
+describe('reload in the audit log', () => {
+  beforeEach(() => seyfertSupportsHotReload(true));
+
+  const reloads = (entries: AuditEntry[]) => entries.filter((e) => e.action === 'run' && e.mode === 'reload');
+
+  it('a hot reload adds what happened to its audit entry', async () => {
+    const entries: AuditEntry[] = [];
+    reloadEnvironment.inContainer = () => true;
+    const { bot, byaku } = await setup(
+      {
+        id: 0,
+        total: 3,
+        reload: async () => [
+          { workerId: 1, ok: true, ms: 10 },
+          { workerId: 2, ok: false, error: 'boom', ms: 10 },
+        ],
+      },
+      { audit: (entry) => void entries.push(entry) },
+    );
+    await reload(bot, byaku, 'reload');
+    expect(reloads(entries)).toHaveLength(1);
+    expect(reloads(entries)[0]).toMatchObject({
+      outcome: 'error',
+      details: { kind: 'hot', workers: 3, reloaded: 1, failed: 1, skipped: 1, docker: true },
+    });
+  });
+
+  it('reload files adds its counts to its audit entry', async () => {
+    const entries: AuditEntry[] = [];
+    const { bot, byaku } = await setup(undefined, { audit: (entry) => void entries.push(entry) });
+    Object.defineProperty(bot.client, 'components', {
+      value: {
+        reloadAll: vi.fn(),
+        reloadFiles: async () => ({ reloaded: ['a', 'b'], failed: [{ path: 'c', error: new Error('x') }] }),
+      },
+      configurable: true,
+    });
+    Object.defineProperty(bot.client, 'commands', {
+      value: { values: [], onFile: () => [], reloadAll: vi.fn() },
+      configurable: true,
+    });
+    await reload(bot, byaku, 'reload files');
+    expect(reloads(entries)).toHaveLength(1);
+    expect(reloads(entries)[0]?.details).toEqual({ kind: 'files', files: 2, failed: 1, skipped: 1 });
+  });
+
+  it('other runs keep their audit entries without details', async () => {
+    const entries: AuditEntry[] = [];
+    const { bot, byaku } = await setup(undefined, { audit: (entry) => void entries.push(entry) });
+    await reload(bot, byaku, 'js 1 + 1');
+    expect(entries.find((e) => e.action === 'run')).not.toHaveProperty('details');
+  });
+});
+
+describe('finishing the reload message after this worker is replaced', () => {
+  beforeEach(() => {
+    seyfertSupportsHotReload(true);
+    reloadTimings.activePollMs = 5;
+  });
+  afterEach(() => {
+    reloadTimings.activePollMs = 500;
+  });
+
+  const pendingIn = async (store: MemorySessionStore) =>
+    (await store.list()).map((s) => s.data.pendingReload).filter(Boolean) as { workerId: number; expiresAt: number }[];
+
+  it('with a shared store, saves a pending reload while it runs and clears it after the result', async () => {
+    const store = new MemorySessionStore();
+    let during: { workerId: number; expiresAt: number }[] = [];
+    const { bot, byaku } = await setup(
+      {
+        id: 0,
+        total: 2,
+        reload: async (request) => {
+          during = await pendingIn(store);
+          return (request.workerIds ?? []).map((workerId) => ({ workerId, ok: true, ms: 10 }));
+        },
+      },
+      { store },
+    );
+
+    await reload(bot, byaku, 'reload');
+    expect(during).toHaveLength(1);
+    expect(during[0]?.workerId).toBe(0);
+    expect(during[0]?.expiresAt).toBeGreaterThan(Date.now());
+    expect(await pendingIn(store)).toHaveLength(0);
+  });
+
+  it('without a store, nothing is saved for a replacement', async () => {
+    let saved: unknown[] = ['not checked'];
+    const { bot, byaku } = await setup({
+      id: 0,
+      total: 2,
+      reload: async (request) => {
+        saved = (await byaku.sessions.store.list()).map((s) => s.data.pendingReload).filter(Boolean);
+        return (request.workerIds ?? []).map((workerId) => ({ workerId, ok: true, ms: 10 }));
+      },
+    });
+    await reload(bot, byaku, 'reload');
+    expect(saved).toEqual([]);
+  });
+
+  async function replacementOf(store: MemorySessionStore, finishedFirst: boolean) {
+    // The old worker's reload message, left pending as if that worker died before the result
+    const old = await FakeBot.create();
+    const oldByaku = new Byaku(old.client, { advanced: { includeAppOwners: false, store } });
+    await oldByaku.run({ ownerId: OWNER_ID, channelId: CHANNEL_ID, text: 'js 1', delivery: { kind: 'reply' } });
+    const [session] = await store.list();
+    session!.data.pendingReload = {
+      workerId: 0,
+      workerIds: [1, 0],
+      startedAt: Date.now() - 4000,
+      expiresAt: Date.now() + 60_000,
+    };
+    await store.set(session!);
+
+    // The replacement: the same worker id, on standby until the manager switches to it
+    let state: 'standby' | 'active' = 'standby';
+    Object.assign(old.client, {
+      workerData: { workerId: 0, totalWorkers: 2, shards: [0], totalShards: 2 },
+      tellWorker: () => undefined,
+    });
+    Object.defineProperty(old.client, 'isHotReloadReplacement', { get: () => true, configurable: true });
+    Object.defineProperty(old.client, 'hotReloadState', { get: () => state, configurable: true });
+    const replacement = new Byaku(old.client, { advanced: { includeAppOwners: false, store } });
+    await replacement.install();
+
+    const edits = () => old.calls.filter((c) => c.method === 'PATCH' && c.url.includes(session!.replyId!));
+    const before = edits().length;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(edits().length).toBe(before); // still on standby
+    if (finishedFirst) {
+      delete session!.data.pendingReload;
+      await store.set(session!);
+    }
+    state = 'active';
+    return { old, session: session!, edits, before };
+  }
+
+  it('a replacement on standby edits the message once, after it becomes active', async () => {
+    const store = new MemorySessionStore();
+    const { old, session, edits, before } = await replacementOf(store, false);
+    await vi.waitFor(() => expect(edits().length).toBe(before + 1));
+    expect(old.messages.get(session.replyId!)?.content).toMatch(/✅ Reload finished · worker 0 took over · \d/);
+    expect(await pendingIn(store)).toHaveLength(0);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(edits().length).toBe(before + 1);
+  });
+
+  it('a replacement leaves the message alone when the old worker finished it', async () => {
+    const store = new MemorySessionStore();
+    const { edits, before } = await replacementOf(store, true);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(edits().length).toBe(before);
   });
 });

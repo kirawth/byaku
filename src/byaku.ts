@@ -39,6 +39,7 @@ import {
   ModeRegistry,
   type ModeReturn,
 } from './modes/index.js';
+import { finishPendingReload } from './modes/reload.js';
 import { type AuditEntry, ByakuError, type ByakuOptions, type ResolvedOptions, resolveOptions } from './options.js';
 import { escapeFences, paginate, Redactor, secretsFromEnv, truncate } from './output.js';
 import {
@@ -265,6 +266,10 @@ export class Byaku {
     installBridge(this.bridge);
     this.sessions.start();
     void this.refreshAppOwners();
+    // A hot reload replacement finishes the reload message its predecessor could not
+    void finishPendingReload(this).catch((err: unknown) =>
+      this.client.logger.warn('[byaku] could not finish a reload message:', errorMessage(err)),
+    );
   }
 
   /** Stops listening, kills running work and deactivates handlers. Plugin contributions are removed on client close. */
@@ -576,6 +581,7 @@ export class Byaku {
       result = { output: formatError(err), ok: false };
     }
     const ms = performance.now() - started;
+    const details = typeof result === 'object' && result?.details ? this.redactDetails(result.details) : undefined;
 
     const live = this.lives.get(session.id);
     if (live) {
@@ -600,7 +606,14 @@ export class Byaku {
       durationMs: Math.round(ms),
       codeLength: parsed.body.length,
       ...(boolFlag(parsed.flags, 'unsafe') ? { unsafe: true } : {}),
+      ...(details ? { details } : {}),
     });
+  }
+
+  private redactDetails(details: Record<string, string | number | boolean>): Record<string, string | number | boolean> {
+    return Object.fromEntries(
+      Object.entries(details).map(([key, value]) => [key, typeof value === 'string' ? this.redact(value) : value]),
+    );
   }
 
   private async prepareSession(

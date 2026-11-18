@@ -178,6 +178,34 @@ new Byaku(client, {
 | `slash`    | `boolean \| { guilds?: string[] }` | `false` | Adds the owner-only `/byaku` command with a code form and file upload          |
 
 <details>
+<summary><b>Audit entries</b></summary>
+
+<br>
+
+`audit` gets one `AuditEntry` per run, button press and refusal: who, where, which mode, the outcome and how long
+it took, never the code itself. Some runs add `details` about what they did. A reload, for example:
+
+```ts
+{
+  at: 1763560000000,
+  action: 'run',
+  mode: 'reload',
+  userId: '123456789012345678',
+  channelId: '987654321098765432',
+  sessionId: 'f3k9a2b7c1',
+  outcome: 'error', // a worker failed
+  durationMs: 41200,
+  codeLength: 0,
+  details: { kind: 'hot', workers: 3, reloaded: 2, failed: 1, skipped: 0, docker: false },
+}
+```
+
+`reload files` adds `{ kind: 'files', files, failed, skipped }`. Your own modes can return `details` too
+(`{ output, details: { rows: 12 } }`); string values are redacted like the rest of the entry.
+
+</details>
+
+<details>
 <summary><b>Advanced options</b> (rarely needed)</summary>
 
 <br>
@@ -503,11 +531,26 @@ all. Seyfert's `resumeSession` option avoids that for one-shard workers with a s
 Not reloaded: the manager file itself, and anything kept in a worker's memory (cooldowns, collectors, eval
 variables).
 
+The worker you typed `?by reload` in is replaced too (last, by default). It normally gets the result before it
+drains and finishes the message itself. With a shared session store (`advanced.store`, for example Redis), its
+replacement also watches for that reload: if the old worker didn't get to finish the message, the new one edits it
+with "✅ Reload finished · worker N took over" once it takes over.
+
+**With Docker**, a hot reload loads the code that is already in the container's image, so it helps when files
+change inside the running container (a mounted volume, or a build run in it). To deploy a new version, rebuild the
+image and recreate the container (`docker compose up -d --build`). Byaku notices when it runs in a container and
+adjusts its hints: after updating Seyfert, it asks you to rebuild and recreate instead of restarting the bot.
+
 `?by reload` checks the setup first. If the installed Seyfert is too old, it shows the version it found and the
 update command for your package manager (`pnpm add seyfert@dev`, `npm install seyfert@dev`, …); after updating,
 restart the bot once so the manager process runs the new Seyfert too. If the bot runs on a single `Client`, it says
 that hot reload needs the `WorkerManager`. If the manager never answers (it still runs an old Seyfert), the reload
 stops after 15 seconds and says so. `?by reload files` works on any setup.
+
+`?by reload files` lists every file it could not load again, with the error; those files keep their previous
+version. That report needs Seyfert 5.2.2-dev-44386046816.0 or newer. Older Seyferts reload without your handler's
+`onFile`, which drops files that export several classes, so on those Byaku skips a handler with a custom `onFile`
+(`--force` runs it anyway) and reports any file the reload dropped.
 
 </details>
 

@@ -27,6 +27,8 @@ export interface ModeOutput {
   hasValue?: boolean;
   /** Extra parts for the status line. */
   status?: string[];
+  /** Copied into the run's audit entry as `details`, for what the run did (counts, kinds). */
+  details?: Record<string, string | number | boolean>;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-invalid-void-type -- a mode may return nothing
