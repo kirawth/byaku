@@ -178,6 +178,34 @@ new Byaku(client, {
 | `slash`    | `boolean \| { guilds?: string[] }` | `false` | Adds the owner-only `/byaku` command with a code form and file upload          |
 
 <details>
+<summary><b>Audit entries</b></summary>
+
+<br>
+
+`audit` gets one `AuditEntry` per run, button press and refusal: who, where, which mode, the outcome and how long
+it took, never the code itself. Some runs add `details` about what they did. A reload, for example:
+
+```ts
+{
+  at: 1763560000000,
+  action: 'run',
+  mode: 'reload',
+  userId: '123456789012345678',
+  channelId: '987654321098765432',
+  sessionId: 'f3k9a2b7c1',
+  outcome: 'error', // a worker failed
+  durationMs: 41200,
+  codeLength: 0,
+  details: { kind: 'hot', workers: 3, reloaded: 2, failed: 1, skipped: 0, docker: false },
+}
+```
+
+`reload files` adds `{ kind: 'files', files, failed, skipped }`. Your own modes can return `details` too
+(`{ output, details: { rows: 12 } }`); string values are redacted like the rest of the entry.
+
+</details>
+
+<details>
 <summary><b>Advanced options</b> (rarely needed)</summary>
 
 <br>

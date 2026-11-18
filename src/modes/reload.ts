@@ -225,6 +225,14 @@ async function hotReload(ctx: ModeContext, client: HotReloadClient): Promise<Mod
     output: [render(), ...(notes.length ? ['', ...notes] : [])].join('\n'),
     ok: failed === 0 && skipped === 0,
     status: [`${result.workers.length - failed}/${ids.length} reloaded`],
+    details: {
+      kind: 'hot',
+      workers: ids.length,
+      reloaded: result.workers.length - failed,
+      failed,
+      skipped,
+      docker: reloadEnvironment.inContainer(),
+    },
   };
 }
 
@@ -357,6 +365,7 @@ async function reloadFiles(ctx: ModeContext): Promise<ModeOutput> {
       'Your main file, services and the helpers these files import keep their old code.',
     ].join('\n'),
     ok,
+    details: { kind: 'files', files: report.files, failed: report.failed, skipped: report.skipped },
   };
 }
 

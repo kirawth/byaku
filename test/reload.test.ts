@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Byaku } from '../src/byaku.js';
+import type { AuditEntry, ByakuOptions } from '../src/options.js';
 import { reloadEnvironment, reloadTimings, updateCommand } from '../src/modes/reload.js';
 import { CHANNEL_ID, FakeBot, OWNER_ID } from './helpers.js';
 
@@ -19,7 +20,10 @@ interface Request {
 
 type Workers = { workerId: number; ok: boolean; error?: string; ms: number }[];
 
-async function setup(worker?: { id: number; total: number; reload?: (request: Request) => Promise<Workers> }) {
+async function setup(
+  worker?: { id: number; total: number; reload?: (request: Request) => Promise<Workers> },
+  options: Omit<ByakuOptions, 'advanced'> = {},
+) {
   const bot = await FakeBot.create();
   if (worker) {
     Object.assign(bot.client, {
@@ -30,7 +34,7 @@ async function setup(worker?: { id: number; total: number; reload?: (request: Re
         : {}),
     });
   }
-  const byaku = new Byaku(bot.client, { advanced: { includeAppOwners: false } });
+  const byaku = new Byaku(bot.client, { ...options, advanced: { includeAppOwners: false } });
   await byaku.install();
   return { bot, byaku };
 }
@@ -371,5 +375,59 @@ describe('reload inside a container', () => {
       );
       expect(content.includes('restart the bot once after updating Seyfert')).toBe(!inContainer);
     }
+  });
+});
+
+describe('reload in the audit log', () => {
+  beforeEach(() => seyfertSupportsHotReload(true));
+
+  const reloads = (entries: AuditEntry[]) => entries.filter((e) => e.action === 'run' && e.mode === 'reload');
+
+  it('a hot reload adds what happened to its audit entry', async () => {
+    const entries: AuditEntry[] = [];
+    reloadEnvironment.inContainer = () => true;
+    const { bot, byaku } = await setup(
+      {
+        id: 0,
+        total: 3,
+        reload: async () => [
+          { workerId: 1, ok: true, ms: 10 },
+          { workerId: 2, ok: false, error: 'boom', ms: 10 },
+        ],
+      },
+      { audit: (entry) => void entries.push(entry) },
+    );
+    await reload(bot, byaku, 'reload');
+    expect(reloads(entries)).toHaveLength(1);
+    expect(reloads(entries)[0]).toMatchObject({
+      outcome: 'error',
+      details: { kind: 'hot', workers: 3, reloaded: 1, failed: 1, skipped: 1, docker: true },
+    });
+  });
+
+  it('reload files adds its counts to its audit entry', async () => {
+    const entries: AuditEntry[] = [];
+    const { bot, byaku } = await setup(undefined, { audit: (entry) => void entries.push(entry) });
+    Object.defineProperty(bot.client, 'components', {
+      value: {
+        reloadAll: vi.fn(),
+        reloadFiles: async () => ({ reloaded: ['a', 'b'], failed: [{ path: 'c', error: new Error('x') }] }),
+      },
+      configurable: true,
+    });
+    Object.defineProperty(bot.client, 'commands', {
+      value: { values: [], onFile: () => [], reloadAll: vi.fn() },
+      configurable: true,
+    });
+    await reload(bot, byaku, 'reload files');
+    expect(reloads(entries)).toHaveLength(1);
+    expect(reloads(entries)[0]?.details).toEqual({ kind: 'files', files: 2, failed: 1, skipped: 1 });
+  });
+
+  it('other runs keep their audit entries without details', async () => {
+    const entries: AuditEntry[] = [];
+    const { bot, byaku } = await setup(undefined, { audit: (entry) => void entries.push(entry) });
+    await reload(bot, byaku, 'js 1 + 1');
+    expect(entries.find((e) => e.action === 'run')).not.toHaveProperty('details');
   });
 });

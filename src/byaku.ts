@@ -576,6 +576,7 @@ export class Byaku {
       result = { output: formatError(err), ok: false };
     }
     const ms = performance.now() - started;
+    const details = typeof result === 'object' && result?.details ? this.redactDetails(result.details) : undefined;
 
     const live = this.lives.get(session.id);
     if (live) {
@@ -600,7 +601,14 @@ export class Byaku {
       durationMs: Math.round(ms),
       codeLength: parsed.body.length,
       ...(boolFlag(parsed.flags, 'unsafe') ? { unsafe: true } : {}),
+      ...(details ? { details } : {}),
     });
+  }
+
+  private redactDetails(details: Record<string, string | number | boolean>): Record<string, string | number | boolean> {
+    return Object.fromEntries(
+      Object.entries(details).map(([key, value]) => [key, typeof value === 'string' ? this.redact(value) : value]),
+    );
   }
 
   private async prepareSession(
